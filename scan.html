@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multimedia Library — Scan</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --card: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+    --accent: #2f6f4f;
+    --accent-dark: #234f38;
+    --border: #e0e0e0;
+    --danger: #b3261e;
+    --warn: #8a5a00;
+    --warn-bg: #fff6e5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 12px;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 8px 0 16px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=password], select {
+    width: 100%;
+    padding: 10px;
+    font-size: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+  }
+  button {
+    font-size: 16px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    margin-top: 12px;
+    width: 100%;
+  }
+  button.primary { background: var(--accent); color: #fff; }
+  button.primary:active { background: var(--accent-dark); }
+  button.secondary { background: #eee; color: var(--text); }
+  button.link { background: none; color: var(--accent); text-decoration: underline; width: auto; padding: 4px; margin-top: 8px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .status { font-size: 14px; color: var(--muted); margin: 8px 0; }
+  .warn { background: var(--warn-bg); color: var(--warn); padding: 10px; border-radius: 8px; font-size: 14px; margin-bottom: 10px; }
+  .error { color: var(--danger); font-size: 14px; margin: 8px 0; }
+  .result-item {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 8px;
+    cursor: pointer;
+    background: #fff;
+  }
+  .result-item:active { background: #f0f0f0; }
+  .hidden { display: none; }
+  .barcode-display { font-family: monospace; font-size: 15px; color: var(--muted); }
+  #reader { border-radius: 8px; overflow: hidden; }
+</style>
+</head>
+<body>
+
+<h1>Scan an item</h1>
+
+<!-- ============ PIN entry ============ -->
+<div id="pinCard" class="card hidden">
+  <p>Enter the shared PIN to start scanning. This is saved on this device so you won't need to enter it again.</p>
+  <label for="pinInput">PIN</label>
+  <input type="password" id="pinInput" inputmode="numeric" autocomplete="off">
+  <button class="primary" onclick="savePin()">Continue</button>
+  <div id="pinError" class="error hidden"></div>
+</div>
+
+<!-- ============ Camera + manual entry ============ -->
+<div id="scanCard" class="card hidden">
+  <div id="reader"></div>
+  <p class="status">Point the camera at the barcode on the CD or DVD case.</p>
+  <label for="manualBarcode">Or type the barcode number</label>
+  <div class="row">
+    <input type="text" id="manualBarcode" inputmode="numeric" placeholder="e.g. 602475027799">
+    <button class="secondary" style="max-width:120px" onclick="lookupManual()">Look up</button>
+  </div>
+  <button class="link" onclick="changePin()">Change PIN</button>
+</div>
+
+<!-- ============ Working / status ============ -->
+<div id="workingCard" class="card hidden">
+  <p class="status" id="workingText">Looking up…</p>
+</div>
+
+<!-- ============ Duplicate ============ -->
+<div id="dupCard" class="card hidden">
+  <div class="warn">Already in the catalogue</div>
+  <p><strong id="dupTitle"></strong><br><span id="dupCreator"></span></p>
+  <p class="status">Location on file: <span id="dupLocation"></span></p>
+  <button class="secondary" onclick="scanNext()">Scan next item</button>
+  <button class="link" onclick="addAnotherCopy()">This is a second copy — add it anyway</button>
+</div>
+
+<!-- ============ Title search (used when barcode lookup finds nothing) ============ -->
+<div id="titleSearchCard" class="card hidden">
+  <p>No automatic match for barcode <span class="barcode-display" id="tsBarcode"></span>. Type the movie title to search:</p>
+  <div class="row">
+    <input type="text" id="titleQuery" placeholder="Movie title">
+    <button class="secondary" style="max-width:100px" onclick="doTitleSearch()">Search</button>
+  </div>
+  <div id="titleResults"></div>
+  <button class="link" onclick="skipToManualEntry()">Skip — enter details by hand instead</button>
+</div>
+
+<!-- ============ Review / edit before save ============ -->
+<div id="reviewCard" class="card hidden">
+  <p class="status">Check the details below before saving — barcode <span class="barcode-display" id="revBarcode"></span></p>
+  <div id="lowConfidenceNote" class="warn hidden">This came from a title search, not the barcode — double-check it's the right edition.</div>
+
+  <label for="revType">Type</label>
+  <select id="revType">
+    <option value="CD">CD</option>
+    <option value="DVD">DVD</option>
+  </select>
+
+  <label for="revTitle">Title</label>
+  <input type="text" id="revTitle">
+
+  <label for="revCreator" id="revCreatorLabel">Artist / Director</label>
+  <input type="text" id="revCreator">
+
+  <label for="revSecondary" id="revSecondaryLabel">Composer / Main actors</label>
+  <input type="text" id="revSecondary">
+
+  <label for="revGenre">Genre</label>
+  <input type="text" id="revGenre">
+
+  <label for="revYear">Year</label>
+  <input type="text" id="revYear" inputmode="numeric">
+
+  <label for="revLocation">Location (shelf / box)</label>
+  <input type="text" id="revLocation" placeholder="e.g. Shelf 3, Box B">
+
+  <button class="primary" onclick="saveItem()">Save to catalogue</button>
+  <button class="secondary" onclick="scanNext()">Cancel</button>
+  <div id="saveError" class="error hidden"></div>
+</div>
+
+<!-- ============ Saved confirmation ============ -->
+<div id="savedCard" class="card hidden">
+  <p><strong>Saved.</strong> <span id="savedTitle"></span> is now in the catalogue.</p>
+  <button class="primary" onclick="scanNext()">Scan next item</button>
+</div>
+
+<script>
+// ---------------------------------------------------------------------
+// Fill in your deployed Apps Script Web App URL here (Deploy > Manage
+// deployments in the Apps Script editor). It stays the same across
+// "New version" redeploys, so this normally only needs setting once.
+// ---------------------------------------------------------------------
+const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbzKl1J0z-FcE-efTBO5pVvZ81_FoTvmpnzGbeOymQFFG3yMZg4lFb93I8ncCUqZut03gw/exec';
+
+let pin = null;
+let scanner = null;
+let currentBarcode = null;
+let currentSource = 'manual';
+
+function $(id) { return document.getElementById(id); }
+function show(id) { $(id).classList.remove('hidden'); }
+function hide(id) { $(id).classList.add('hidden'); }
+function hideAllCards() {
+  ['pinCard','scanCard','workingCard','dupCard','titleSearchCard','reviewCard','savedCard']
+    .forEach(hide);
+}
+
+// ---- PIN handling -----------------------------------------------------
+
+function init() {
+  pin = localStorage.getItem('mlb_pin');
+  if (pin) {
+    startScanning();
+  } else {
+    hideAllCards();
+    show('pinCard');
+  }
+}
+
+function savePin() {
+  const val = $('pinInput').value.trim();
+  if (!val) return;
+  pin = val;
+  localStorage.setItem('mlb_pin', pin);
+  hide('pinError');
+  startScanning();
+}
+
+function changePin() {
+  localStorage.removeItem('mlb_pin');
+  stopScanning();
+  pin = null;
+  hideAllCards();
+  show('pinCard');
+}
+
+// ---- Backend calls ------------------------------------------------------
+
+async function apiGet(params) {
+  const qs = Object.keys(params)
+    .map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); })
+    .join('&');
+  const resp = await fetch(BACKEND_URL + '?' + qs);
+  return resp.json();
+}
+
+// ---- Camera scanning ------------------------------------------------------
+
+function startScanning() {
+  hideAllCards();
+  show('scanCard');
+  if (scanner) return; // already running
+  scanner = new Html5QrcodeScanner('reader', {
+    fps: 10,
+    qrbox: { width: 250, height: 150 },
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8,
+      Html5QrcodeSupportedFormats.UPC_A,
+      Html5QrcodeSupportedFormats.UPC_E,
+      Html5QrcodeSupportedFormats.CODE_128,
+      Html5QrcodeSupportedFormats.CODE_39
+    ]
+  }, false);
+  scanner.render(onScanSuccess, function () { /* ignore per-frame decode failures */ });
+}
+
+function stopScanning() {
+  if (scanner) {
+    try { scanner.clear(); } catch (e) { /* ignore */ }
+    scanner = null;
+  }
+}
+
+function onScanSuccess(decodedText) {
+  stopScanning();
+  handleBarcode(decodedText);
+}
+
+function lookupManual() {
+  const code = $('manualBarcode').value.trim();
+  if (!code) return;
+  stopScanning();
+  handleBarcode(code);
+}
+
+// ---- Lookup flow ------------------------------------------------------
+
+async function handleBarcode(barcode) {
+  currentBarcode = barcode;
+  hideAllCards();
+  show('workingCard');
+  $('workingText').textContent = 'Looking up barcode ' + barcode + '…';
+
+  let data;
+  try {
+    data = await apiGet({ action: 'lookup', barcode: barcode, pin: pin });
+  } catch (err) {
+    return showTitleSearch(); // network hiccup — fall through to manual/title path rather than dead-end
+  }
+
+  if (data.error === 'bad_pin') {
+    alert('That PIN was rejected by the backend. Use "Change PIN" to re-enter it.');
+    return scanNext();
+  }
+
+  if (data.duplicate) {
+    $('dupTitle').textContent = data.existing.title + ' (' + data.existing.mediaType + ')';
+    $('dupCreator').textContent = data.existing.creator || '';
+    $('dupLocation').textContent = data.existing.location || '(not recorded)';
+    hideAllCards();
+    show('dupCard');
+    return;
+  }
+
+  if (data.guess) {
+    openReview(data.guess, data.confidence === 'high');
+    return;
+  }
+
+  // No match — for CDs this is rare; for DVDs it's the normal case.
+  showTitleSearch();
+}
+
+function addAnotherCopy() {
+  openReview({ mediaType: '', title: '', creator: '', secondaryCredit: '', genre: '', year: '' }, false);
+}
+
+// ---- Title search (DVD fallback) ------------------------------------------------------
+
+function showTitleSearch() {
+  $('tsBarcode').textContent = currentBarcode;
+  $('titleQuery').value = '';
+  $('titleResults').innerHTML = '';
+  hideAllCards();
+  show('titleSearchCard');
+}
+
+async function doTitleSearch() {
+  const q = $('titleQuery').value.trim();
+  if (!q) return;
+  $('titleResults').innerHTML = '<p class="status">Searching…</p>';
+  let data;
+  try {
+    data = await apiGet({ action: 'titleSearch', q: q, pin: pin });
+  } catch (err) {
+    $('titleResults').innerHTML = '<p class="error">Search failed — check your connection and try again.</p>';
+    return;
+  }
+  if (!data.results || data.results.length === 0) {
+    $('titleResults').innerHTML = '<p class="status">No matches. Try a different spelling, or enter details by hand.</p>';
+    return;
+  }
+  $('titleResults').innerHTML = '';
+  data.results.forEach(function (m) {
+    const div = document.createElement('div');
+    div.className = 'result-item';
+    div.textContent = m.title + (m.year ? ' (' + m.year + ')' : '');
+    div.onclick = function () { pickTitleResult(m.id); };
+    $('titleResults').appendChild(div);
+  });
+}
+
+async function pickTitleResult(id) {
+  hideAllCards();
+  show('workingCard');
+  $('workingText').textContent = 'Fetching details…';
+  let data;
+  try {
+    data = await apiGet({ action: 'titleDetails', id: id, pin: pin });
+  } catch (err) {
+    alert('Could not fetch details — try again.');
+    return showTitleSearch();
+  }
+  if (!data.ok) {
+    alert('Could not fetch details for that title — try again or enter by hand.');
+    return showTitleSearch();
+  }
+  openReview(data.guess, false); // title-search results are lower-confidence than a direct barcode hit — always flagged for a closer look
+}
+
+function skipToManualEntry() {
+  openReview({ mediaType: 'DVD', title: '', creator: '', secondaryCredit: '', genre: '', year: '' }, false);
+}
+
+// ---- Review / save ------------------------------------------------------
+
+function openReview(guess, highConfidence) {
+  currentSource = highConfidence ? (guess.mediaType === 'CD' ? 'musicbrainz' : 'tmdb') : (guess.title ? 'tmdb' : 'manual');
+  $('revBarcode').textContent = currentBarcode || '(none)';
+  $('revType').value = guess.mediaType || 'CD';
+  $('revTitle').value = guess.title || '';
+  $('revCreator').value = guess.creator || '';
+  $('revSecondary').value = guess.secondaryCredit || '';
+  $('revGenre').value = guess.genre || '';
+  $('revYear').value = guess.year || '';
+  $('revLocation').value = '';
+  updateFieldLabels();
+  if (highConfidence) {
+    hide('lowConfidenceNote');
+  } else {
+    show('lowConfidenceNote');
+  }
+  hide('saveError');
+  hideAllCards();
+  show('reviewCard');
+}
+
+$_typeChangeBound = false;
+function updateFieldLabels() {
+  const isDvd = $('revType').value === 'DVD';
+  $('revCreatorLabel').textContent = isDvd ? 'Director' : 'Artist';
+  $('revSecondaryLabel').textContent = isDvd ? 'Main actors' : 'Composer';
+}
+
+async function saveItem() {
+  const params = {
+    action: 'add',
+    pin: pin,
+    barcode: currentBarcode || '',
+    mediaType: $('revType').value,
+    title: $('revTitle').value.trim(),
+    creator: $('revCreator').value.trim(),
+    secondaryCredit: $('revSecondary').value.trim(),
+    genre: $('revGenre').value.trim(),
+    year: $('revYear').value.trim(),
+    location: $('revLocation').value.trim(),
+    source: currentSource
+  };
+  if (!params.barcode || !params.title) {
+    $('saveError').textContent = 'Barcode and title are required.';
+    show('saveError');
+    return;
+  }
+  let data;
+  try {
+    data = await apiGet(params);
+  } catch (err) {
+    $('saveError').textContent = 'Save failed — check your connection and try again.';
+    show('saveError');
+    return;
+  }
+  if (!data.ok) {
+    $('saveError').textContent = 'Save failed: ' + (data.error || 'unknown error');
+    show('saveError');
+    return;
+  }
+  $('savedTitle').textContent = params.title;
+  hideAllCards();
+  show('savedCard');
+}
+
+function scanNext() {
+  currentBarcode = null;
+  startScanning();
+}
+
+// bind the type dropdown once the page is ready
+document.addEventListener('DOMContentLoaded', function () {
+  $('revType').addEventListener('change', updateFieldLabels);
+  init();
+});
+</script>
+</body>
+</html>
