@@ -378,6 +378,9 @@ function openCropper(file) {
   hideAllCards();
   hide('cropError');
   show('cropCard');
+  const confirmBtn = $('cropConfirmBtn');
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = 'Use this crop'; // reset in case a previous item left this mid-"Reading…"
   const img = $('cropImage');
   // Cropper.js needs the image actually loaded before it can measure it —
   // bind onload before setting src so it's never missed.
@@ -406,20 +409,27 @@ async function confirmCrop() {
   const btn = $('cropConfirmBtn');
   btn.disabled = true;
   btn.textContent = 'Reading…';
+  let decodedOk = false;
   try {
     const canvas = cropper.getCroppedCanvas({ imageSmoothingQuality: 'high' });
     const blob = await new Promise(function (resolve) { canvas.toBlob(resolve, 'image/png'); });
     const croppedFile = new File([blob], 'barcode-crop.png', { type: 'image/png' });
     const decodedText = await getPhotoScanner().scanFile(croppedFile, false);
+    decodedOk = true;
     closeCropper();
     handleBarcode(decodedText);
-    return;
   } catch (err) {
     $('cropError').textContent = "Couldn't read a barcode in that crop. Try trimming tighter around just the barcode — no case artwork, no empty margin — or retake the photo.";
     show('cropError');
+  } finally {
+    // Always restore the button — even on success, since it's the same DOM
+    // element that'll be reused (via openCropper's own reset) for the next
+    // item; leaving it stuck on "Reading…" was exactly today's bug.
+    if (!decodedOk) {
+      btn.disabled = false;
+      btn.textContent = 'Use this crop';
+    }
   }
-  btn.disabled = false;
-  btn.textContent = 'Use this crop';
 }
 
 function retakePhoto() {
