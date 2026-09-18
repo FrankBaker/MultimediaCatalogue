@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Multimedia Library — Scan</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.5/cropper.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.5/cropper.min.css">
 <style>
   :root {
     --bg: #f7f7f8;
@@ -94,7 +96,7 @@
 <!-- ============ Camera + manual entry ============ -->
 <div id="scanCard" class="card hidden">
   <button class="primary" onclick="triggerPhotoScan()">📷 Scan barcode</button>
-  <p class="status">Takes a single photo instead of using a live preview — your phone's camera app can auto-focus close up (some phones switch to a macro lens); the live preview below can't do that on most phones, which is why it needs you uncomfortably close. Get the barcode roughly filling the photo, doesn't need to be exact.</p>
+  <p class="status">Take a photo — doesn't need to be perfectly framed, you'll trim it down to just the barcode on the next screen.</p>
   <input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden">
   <div id="photoReader" class="hidden"></div>
 
@@ -106,9 +108,21 @@
 
   <button class="link" id="liveScannerToggle" onclick="toggleLiveScanner()">Try live camera scanning instead</button>
   <div id="reader" class="hidden"></div>
-  <p class="status hidden" id="liveScannerHint">Line the barcode up inside the box — it doesn't need to fill it, just be fully inside and in focus. If it keeps hunting for focus, the photo option above is usually faster.</p>
+  <p class="status hidden" id="liveScannerHint">Line the barcode up inside the box — it doesn't need to fill it, just be fully inside and in focus.</p>
 
   <button class="link" onclick="changePin()">Change PIN</button>
+</div>
+
+<!-- ============ Crop before decoding a photo ============ -->
+<div id="cropCard" class="card hidden">
+  <p class="status">Drag the box so it's tight around just the barcode — leave out the case artwork and empty space, that's what was tripping up the decoder.</p>
+  <div style="max-height:60vh; overflow:hidden; background:#000; border-radius:8px;">
+    <img id="cropImage" style="max-width:100%; display:block;">
+  </div>
+  <button class="primary" id="cropConfirmBtn" onclick="confirmCrop()">Use this crop</button>
+  <div id="cropError" class="error hidden"></div>
+  <button class="secondary" onclick="retakePhoto()">Retake photo</button>
+  <button class="link" onclick="cancelCrop()">Cancel</button>
 </div>
 
 <!-- ============ Working / status ============ -->
@@ -194,12 +208,14 @@ let pin = null;
 let scanner = null;
 let currentBarcode = null;
 let currentSource = 'manual';
+let cropper = null;
+let pendingPhotoObjectUrl = null;
 
 function $(id) { return document.getElementById(id); }
 function show(id) { $(id).classList.remove('hidden'); }
 function hide(id) { $(id).classList.add('hidden'); }
 function hideAllCards() {
-  ['pinCard','scanCard','workingCard','dupCard','titleSearchCard','reviewCard','savedCard']
+  ['pinCard','scanCard','cropCard','workingCard','dupCard','titleSearchCard','reviewCard','savedCard']
     .forEach(hide);
 }
 
@@ -284,15 +300,15 @@ function toggleLiveScanner() {
   $('liveScannerToggle').textContent = 'Hide live camera scanning';
   scanner = new Html5QrcodeScanner('reader', {
     fps: 10,
-    // A wide, flat box roughly matching a barcode's real proportions —
-    // easier to line up than a square, and (unlike the box sizes tried
-    // before this) it's framing guidance, not a "must fill exactly"
-    // requirement; decoding works fine as long as the barcode is fully
-    // inside it and in focus.
+    // Sized to match what's actually achievable in focus on Frank's phone
+    // (measured directly: the barcode fills roughly a third of the frame at
+    // the closest distance that's still sharp) — this is honest framing
+    // guidance, not a decode requirement; it doesn't move the underlying
+    // decode-failure problem (see the note above this function).
     qrbox: function (viewfinderWidth, viewfinderHeight) {
       return {
-        width: Math.floor(viewfinderWidth * 0.85),
-        height: Math.floor(viewfinderHeight * 0.3)
+        width: Math.floor(viewfinderWidth * 0.35),
+        height: Math.floor(viewfinderHeight * 0.35)
       };
     },
     formatsToSupport: BARCODE_FORMATS,
@@ -327,12 +343,13 @@ function lookupManual() {
   handleBarcode(code);
 }
 
-// ---- Photo-based scanning fallback --------------------------------------
-// Live video only gets one shot at whatever resolution/focus the camera
-// stream happens to be delivering at that instant. Taking an actual photo
-// lets the phone's camera app do its normal (better) autofocus and use its
-// full sensor resolution, then this decodes that single image — the same
-// thing as manually cropping and feeding in a barcode photo, just built in.
+// ---- Photo-based scanning: take a photo, crop it, then decode -----------
+// Confirmed by real-world testing (Frank, 2026-09-18): feeding the decoder
+// a full, uncropped photo is unreliable, but a photo cropped tight to just
+// the barcode decodes reliably. So photo capture always goes through an
+// explicit crop step (Cropper.js) before decoding — this isn't optional
+// polish, it's the fix. Taking the photo itself still matters too: the
+// phone's camera app can autofocus closer than this page's live preview.
 
 let photoScanner = null;
 function getPhotoScanner() {
@@ -346,21 +363,73 @@ function triggerPhotoScan() {
   $('photoInput').click();
 }
 
-async function onPhotoChosen(event) {
+function onPhotoChosen(event) {
   const file = event.target.files && event.target.files[0];
   event.target.value = ''; // allow choosing the same file again later
   if (!file) return;
   stopScanning();
+  openCropper(file);
+}
+
+function openCropper(file) {
+  if (pendingPhotoObjectUrl) { URL.revokeObjectURL(pendingPhotoObjectUrl); }
+  pendingPhotoObjectUrl = URL.createObjectURL(file);
+  if (cropper) { cropper.destroy(); cropper = null; }
   hideAllCards();
-  show('workingCard');
-  $('workingText').textContent = 'Reading barcode from photo…';
+  hide('cropError');
+  show('cropCard');
+  const img = $('cropImage');
+  // Cropper.js needs the image actually loaded before it can measure it —
+  // bind onload before setting src so it's never missed.
+  img.onload = function () {
+    cropper = new Cropper(img, {
+      viewMode: 1,
+      autoCropArea: 0.5, // a reasonable starting box — drag it in tight from there
+      background: false,
+      guides: true,
+      movable: true,
+      zoomable: true,
+      scalable: false
+    });
+  };
+  img.src = pendingPhotoObjectUrl;
+}
+
+function closeCropper() {
+  if (cropper) { cropper.destroy(); cropper = null; }
+  if (pendingPhotoObjectUrl) { URL.revokeObjectURL(pendingPhotoObjectUrl); pendingPhotoObjectUrl = null; }
+}
+
+async function confirmCrop() {
+  if (!cropper) return;
+  hide('cropError');
+  const btn = $('cropConfirmBtn');
+  btn.disabled = true;
+  btn.textContent = 'Reading…';
   try {
-    const decodedText = await getPhotoScanner().scanFile(file, false);
+    const canvas = cropper.getCroppedCanvas({ imageSmoothingQuality: 'high' });
+    const blob = await new Promise(function (resolve) { canvas.toBlob(resolve, 'image/png'); });
+    const croppedFile = new File([blob], 'barcode-crop.png', { type: 'image/png' });
+    const decodedText = await getPhotoScanner().scanFile(croppedFile, false);
+    closeCropper();
     handleBarcode(decodedText);
+    return;
   } catch (err) {
-    alert('Could not find a barcode in that photo. Try filling more of the frame with just the barcode, in good light, and take another.');
-    startScanning();
+    $('cropError').textContent = "Couldn't read a barcode in that crop. Try trimming tighter around just the barcode — no case artwork, no empty margin — or retake the photo.";
+    show('cropError');
   }
+  btn.disabled = false;
+  btn.textContent = 'Use this crop';
+}
+
+function retakePhoto() {
+  closeCropper();
+  triggerPhotoScan();
+}
+
+function cancelCrop() {
+  closeCropper();
+  startScanning();
 }
 
 // ---- Lookup flow ------------------------------------------------------
