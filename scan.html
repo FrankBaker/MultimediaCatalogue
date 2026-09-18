@@ -93,16 +93,21 @@
 
 <!-- ============ Camera + manual entry ============ -->
 <div id="scanCard" class="card hidden">
-  <div id="reader"></div>
-  <p class="status">Fill the box with the barcode, hold it flat and steady, and back off slowly until the picture looks sharp — the box is big enough now that you shouldn't need to get uncomfortably close.</p>
-  <button class="secondary" onclick="triggerPhotoScan()">📷 Trouble scanning? Take a photo of the barcode instead</button>
+  <button class="primary" onclick="triggerPhotoScan()">📷 Scan barcode</button>
+  <p class="status">Takes a single photo instead of using a live preview — your phone's camera app can auto-focus close up (some phones switch to a macro lens); the live preview below can't do that on most phones, which is why it needs you uncomfortably close. Get the barcode roughly filling the photo, doesn't need to be exact.</p>
   <input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden">
   <div id="photoReader" class="hidden"></div>
+
   <label for="manualBarcode">Or type the barcode number</label>
   <div class="row">
     <input type="text" id="manualBarcode" inputmode="numeric" placeholder="e.g. 602475027799">
     <button class="secondary" style="max-width:120px" onclick="lookupManual()">Look up</button>
   </div>
+
+  <button class="link" id="liveScannerToggle" onclick="toggleLiveScanner()">Try live camera scanning instead</button>
+  <div id="reader" class="hidden"></div>
+  <p class="status hidden" id="liveScannerHint">Line the barcode up inside the box — it doesn't need to fill it, just be fully inside and in focus. If it keeps hunting for focus, the photo option above is usually faster.</p>
+
   <button class="link" onclick="changePin()">Change PIN</button>
 </div>
 
@@ -248,28 +253,49 @@ const BARCODE_FORMATS = [
   Html5QrcodeSupportedFormats.CODE_39
 ];
 
+// Photo capture (see scanCard markup) is the default/primary way to scan —
+// see the note by that button for why: the live preview below genuinely
+// can't focus as close as a phone's native camera app can on most phones,
+// which is a real hardware/browser limitation, not a tuning problem to
+// solve with box sizes. Live scanning stays available as an opt-in for
+// anyone who prefers it (it only needs to get inside the box, not fill it —
+// see liveScannerHint), started on demand rather than automatically so it's
+// not implicitly presented as the main path.
+
 function startScanning() {
+  stopScanning();
+  hide('reader');
+  hide('liveScannerHint');
+  $('liveScannerToggle').textContent = 'Try live camera scanning instead';
   hideAllCards();
   show('scanCard');
-  if (scanner) return; // already running
+}
+
+function toggleLiveScanner() {
+  if (scanner) {
+    stopScanning();
+    hide('reader');
+    hide('liveScannerHint');
+    $('liveScannerToggle').textContent = 'Try live camera scanning instead';
+    return;
+  }
+  show('reader');
+  show('liveScannerHint');
+  $('liveScannerToggle').textContent = 'Hide live camera scanning';
   scanner = new Html5QrcodeScanner('reader', {
     fps: 10,
-    // A fixed pixel box (the old { width: 280, height: 140 }) forces you to
-    // get uncomfortably close to fill it — often closer than the camera can
-    // actually focus. Sizing it as a fraction of the live viewfinder instead
-    // means the box itself gets bigger on screen, so the barcode can fill it
-    // while the phone stays far enough away to focus properly.
+    // A wide, flat box roughly matching a barcode's real proportions —
+    // easier to line up than a square, and (unlike the box sizes tried
+    // before this) it's framing guidance, not a "must fill exactly"
+    // requirement; decoding works fine as long as the barcode is fully
+    // inside it and in focus.
     qrbox: function (viewfinderWidth, viewfinderHeight) {
       return {
-        width: Math.floor(viewfinderWidth * 0.5),
-        height: Math.floor(viewfinderHeight * 0.5)
+        width: Math.floor(viewfinderWidth * 0.85),
+        height: Math.floor(viewfinderHeight * 0.3)
       };
     },
     formatsToSupport: BARCODE_FORMATS,
-    // Ask the camera for a higher-resolution stream than the library's
-    // default — a CD/DVD barcode only decodes reliably if it's more than a
-    // handful of pixels wide in the actual video frame, and low-res webcam
-    // defaults often aren't enough at a comfortable holding distance.
     videoConstraints: {
       facingMode: 'environment',
       width: { ideal: 1920 },
