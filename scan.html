@@ -94,7 +94,10 @@
 <!-- ============ Camera + manual entry ============ -->
 <div id="scanCard" class="card hidden">
   <div id="reader"></div>
-  <p class="status">Point the camera at the barcode on the CD or DVD case.</p>
+  <p class="status">Fill the box with the barcode, hold it flat and steady, about 8–15cm from the camera, and give it a second to focus.</p>
+  <button class="secondary" onclick="triggerPhotoScan()">📷 Trouble scanning? Take a photo of the barcode instead</button>
+  <input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden">
+  <div id="photoReader" class="hidden"></div>
   <label for="manualBarcode">Or type the barcode number</label>
   <div class="row">
     <input type="text" id="manualBarcode" inputmode="numeric" placeholder="e.g. 602475027799">
@@ -119,9 +122,15 @@
 
 <!-- ============ Title search (used when barcode lookup finds nothing) ============ -->
 <div id="titleSearchCard" class="card hidden">
-  <p>No automatic match for barcode <span class="barcode-display" id="tsBarcode"></span>. Type the movie title to search:</p>
+  <p>No automatic match for barcode <span class="barcode-display" id="tsBarcode"></span>.</p>
+  <label for="tsMediaType">This is a</label>
+  <select id="tsMediaType" onchange="updateTitleSearchPlaceholder()">
+    <option value="DVD">DVD (movie)</option>
+    <option value="CD">CD (music)</option>
+  </select>
+  <label for="titleQuery" id="titleQueryLabel">Movie title</label>
   <div class="row">
-    <input type="text" id="titleQuery" placeholder="Movie title">
+    <input type="text" id="titleQuery" placeholder="e.g. Inception">
     <button class="secondary" style="max-width:100px" onclick="doTitleSearch()">Search</button>
   </div>
   <div id="titleResults"></div>
@@ -230,21 +239,35 @@ async function apiGet(params) {
 
 // ---- Camera scanning ------------------------------------------------------
 
+const BARCODE_FORMATS = [
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.CODE_39
+];
+
 function startScanning() {
   hideAllCards();
   show('scanCard');
   if (scanner) return; // already running
   scanner = new Html5QrcodeScanner('reader', {
     fps: 10,
-    qrbox: { width: 250, height: 150 },
-    formatsToSupport: [
-      Html5QrcodeSupportedFormats.EAN_13,
-      Html5QrcodeSupportedFormats.EAN_8,
-      Html5QrcodeSupportedFormats.UPC_A,
-      Html5QrcodeSupportedFormats.UPC_E,
-      Html5QrcodeSupportedFormats.CODE_128,
-      Html5QrcodeSupportedFormats.CODE_39
-    ]
+    qrbox: { width: 280, height: 140 },
+    formatsToSupport: BARCODE_FORMATS,
+    // Ask the camera for a higher-resolution stream than the library's
+    // default — a CD/DVD barcode only decodes reliably if it's more than a
+    // handful of pixels wide in the actual video frame, and low-res webcam
+    // defaults often aren't enough at a comfortable holding distance.
+    videoConstraints: {
+      facingMode: 'environment',
+      width: { ideal: 1920 },
+      height: { ideal: 1080 }
+    },
+    // Lets Chrome on Android use its faster native decoder when available;
+    // ignored harmlessly on browsers (e.g. iOS Safari) that don't support it.
+    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
   }, false);
   scanner.render(onScanSuccess, function () { /* ignore per-frame decode failures */ });
 }
@@ -266,6 +289,42 @@ function lookupManual() {
   if (!code) return;
   stopScanning();
   handleBarcode(code);
+}
+
+// ---- Photo-based scanning fallback --------------------------------------
+// Live video only gets one shot at whatever resolution/focus the camera
+// stream happens to be delivering at that instant. Taking an actual photo
+// lets the phone's camera app do its normal (better) autofocus and use its
+// full sensor resolution, then this decodes that single image — the same
+// thing as manually cropping and feeding in a barcode photo, just built in.
+
+let photoScanner = null;
+function getPhotoScanner() {
+  if (!photoScanner) {
+    photoScanner = new Html5Qrcode('photoReader', { formatsToSupport: BARCODE_FORMATS });
+  }
+  return photoScanner;
+}
+
+function triggerPhotoScan() {
+  $('photoInput').click();
+}
+
+async function onPhotoChosen(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = ''; // allow choosing the same file again later
+  if (!file) return;
+  stopScanning();
+  hideAllCards();
+  show('workingCard');
+  $('workingText').textContent = 'Reading barcode from photo…';
+  try {
+    const decodedText = await getPhotoScanner().scanFile(file, false);
+    handleBarcode(decodedText);
+  } catch (err) {
+    alert('Could not find a barcode in that photo. Try filling more of the frame with just the barcode, in good light, and take another.');
+    startScanning();
+  }
 }
 
 // ---- Lookup flow ------------------------------------------------------
@@ -298,7 +357,7 @@ async function handleBarcode(barcode) {
   }
 
   if (data.guess) {
-    openReview(data.guess, data.confidence === 'high');
+    openReview(data.guess, data.confidence === 'high', data.source);
     return;
   }
 
@@ -314,33 +373,44 @@ function addAnotherCopy() {
 
 function showTitleSearch() {
   $('tsBarcode').textContent = currentBarcode;
+  $('tsMediaType').value = 'DVD'; // DVDs land here far more often than CDs — sensible default, volunteer can switch it
   $('titleQuery').value = '';
   $('titleResults').innerHTML = '';
+  updateTitleSearchPlaceholder();
   hideAllCards();
   show('titleSearchCard');
+}
+
+function updateTitleSearchPlaceholder() {
+  const isCd = $('tsMediaType').value === 'CD';
+  $('titleQueryLabel').textContent = isCd ? 'Album title (and/or artist)' : 'Movie title';
+  $('titleQuery').placeholder = isCd ? 'e.g. Górecki Symphony No. 3' : 'e.g. Inception';
 }
 
 async function doTitleSearch() {
   const q = $('titleQuery').value.trim();
   if (!q) return;
+  const isCd = $('tsMediaType').value === 'CD';
   $('titleResults').innerHTML = '<p class="status">Searching…</p>';
   let data;
   try {
-    data = await apiGet({ action: 'titleSearch', q: q, pin: pin });
+    data = await apiGet({ action: isCd ? 'musicSearch' : 'titleSearch', q: q, pin: pin });
   } catch (err) {
     $('titleResults').innerHTML = '<p class="error">Search failed — check your connection and try again.</p>';
     return;
   }
   if (!data.results || data.results.length === 0) {
-    $('titleResults').innerHTML = '<p class="status">No matches. Try a different spelling, or enter details by hand.</p>';
+    $('titleResults').innerHTML = '<p class="status">No matches. Try a different spelling (or just the artist/composer), or enter details by hand.</p>';
     return;
   }
   $('titleResults').innerHTML = '';
   data.results.forEach(function (m) {
     const div = document.createElement('div');
     div.className = 'result-item';
-    div.textContent = m.title + (m.year ? ' (' + m.year + ')' : '');
-    div.onclick = function () { pickTitleResult(m.id); };
+    div.textContent = isCd
+      ? m.title + (m.artist ? ' — ' + m.artist : '') + (m.year ? ' (' + m.year + ')' : '')
+      : m.title + (m.year ? ' (' + m.year + ')' : '');
+    div.onclick = function () { isCd ? pickMusicResult(m) : pickTitleResult(m.id); };
     $('titleResults').appendChild(div);
   });
 }
@@ -360,17 +430,40 @@ async function pickTitleResult(id) {
     alert('Could not fetch details for that title — try again or enter by hand.');
     return showTitleSearch();
   }
-  openReview(data.guess, false); // title-search results are lower-confidence than a direct barcode hit — always flagged for a closer look
+  openReview(data.guess, false, 'tmdb-titlesearch'); // title-search results are lower-confidence than a direct barcode hit — always flagged for a closer look
+}
+
+async function pickMusicResult(m) {
+  hideAllCards();
+  show('workingCard');
+  $('workingText').textContent = 'Fetching genre…';
+  let data;
+  try {
+    data = await apiGet({
+      action: 'musicDetails', pin: pin,
+      releaseId: m.id, releaseGroupId: m.releaseGroupId || '', artistId: m.artistId || ''
+    });
+  } catch (err) {
+    data = { ok: false };
+  }
+  // Title/artist/year already came from the search step — genre is a nice-to-have
+  // that can be left blank for the volunteer to fill in if this call fails.
+  const genre = (data && data.ok) ? (data.genre || '') : '';
+  openReview({
+    mediaType: 'CD', title: m.title || '', creator: m.artist || '',
+    secondaryCredit: '', genre: genre, year: m.year || ''
+  }, false, 'musicbrainz-titlesearch');
 }
 
 function skipToManualEntry() {
-  openReview({ mediaType: 'DVD', title: '', creator: '', secondaryCredit: '', genre: '', year: '' }, false);
+  const mediaType = $('tsMediaType').value;
+  openReview({ mediaType: mediaType, title: '', creator: '', secondaryCredit: '', genre: '', year: '' }, false);
 }
 
 // ---- Review / save ------------------------------------------------------
 
-function openReview(guess, highConfidence) {
-  currentSource = highConfidence ? (guess.mediaType === 'CD' ? 'musicbrainz' : 'tmdb') : (guess.title ? 'tmdb' : 'manual');
+function openReview(guess, highConfidence, source) {
+  currentSource = source || 'manual';
   $('revBarcode').textContent = currentBarcode || '(none)';
   $('revType').value = guess.mediaType || 'CD';
   $('revTitle').value = guess.title || '';
@@ -390,7 +483,6 @@ function openReview(guess, highConfidence) {
   show('reviewCard');
 }
 
-$_typeChangeBound = false;
 function updateFieldLabels() {
   const isDvd = $('revType').value === 'DVD';
   $('revCreatorLabel').textContent = isDvd ? 'Director' : 'Artist';
@@ -442,6 +534,7 @@ function scanNext() {
 // bind the type dropdown once the page is ready
 document.addEventListener('DOMContentLoaded', function () {
   $('revType').addEventListener('change', updateFieldLabels);
+  $('photoInput').addEventListener('change', onPhotoChosen);
   init();
 });
 </script>
