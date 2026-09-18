@@ -94,7 +94,7 @@
 <!-- ============ Camera + manual entry ============ -->
 <div id="scanCard" class="card hidden">
   <div id="reader"></div>
-  <p class="status">Fill the box with the barcode, hold it flat and steady, about 8–15cm from the camera, and give it a second to focus.</p>
+  <p class="status">Fill the box with the barcode, hold it flat and steady, and back off slowly until the picture looks sharp — the box is big enough now that you shouldn't need to get uncomfortably close.</p>
   <button class="secondary" onclick="triggerPhotoScan()">📷 Trouble scanning? Take a photo of the barcode instead</button>
   <input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden">
   <div id="photoReader" class="hidden"></div>
@@ -254,7 +254,17 @@ function startScanning() {
   if (scanner) return; // already running
   scanner = new Html5QrcodeScanner('reader', {
     fps: 10,
-    qrbox: { width: 280, height: 140 },
+    // A fixed pixel box (the old { width: 280, height: 140 }) forces you to
+    // get uncomfortably close to fill it — often closer than the camera can
+    // actually focus. Sizing it as a fraction of the live viewfinder instead
+    // means the box itself gets bigger on screen, so the barcode can fill it
+    // while the phone stays far enough away to focus properly.
+    qrbox: function (viewfinderWidth, viewfinderHeight) {
+      return {
+        width: Math.floor(viewfinderWidth * 0.5),
+        height: Math.floor(viewfinderHeight * 0.5)
+      };
+    },
     formatsToSupport: BARCODE_FORMATS,
     // Ask the camera for a higher-resolution stream than the library's
     // default — a CD/DVD barcode only decodes reliably if it's more than a
