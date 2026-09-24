@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DVD Batch Lookup</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --card: #ffffff; --text: #1a1a1a; --muted: #6b6b6b;
+    --accent: #2f6f4f; --accent-dark: #234f38; --border: #e0e0e0;
+    --danger: #b3261e; --warn: #8a5a00; --warn-bg: #fff6e5;
+    --ok-bg: #eaf6ee;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 16px;
+    max-width: 1100px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p.subtitle { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=password], textarea {
+    width: 100%; padding: 10px; font-size: 15px; border: 1px solid var(--border);
+    border-radius: 8px; background: #fff; font-family: inherit;
+  }
+  textarea { min-height: 140px; resize: vertical; }
+  button {
+    font-size: 15px; padding: 11px 16px; border-radius: 8px; border: none;
+    cursor: pointer; margin-top: 12px;
+  }
+  button.primary { background: var(--accent); color: #fff; }
+  button.primary:active { background: var(--accent-dark); }
+  button.secondary { background: #eee; color: var(--text); }
+  button.link { background: none; color: var(--accent); text-decoration: underline; padding: 4px; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 14px; color: var(--muted); margin: 8px 0; }
+  .warn { background: var(--warn-bg); color: var(--warn); padding: 10px; border-radius: 8px; font-size: 14px; margin-bottom: 10px; }
+  .error { color: var(--danger); font-size: 14px; margin: 8px 0; }
+  .hidden { display: none; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 6px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; font-weight: 600; white-space: nowrap; }
+  td input[type=text] { padding: 6px; font-size: 13px; min-width: 110px; }
+  tr.row-error { background: var(--warn-bg); }
+  tr.row-saved { background: var(--ok-bg); }
+  .queried { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .table-wrap { overflow-x: auto; }
+  .row-status { font-size: 12px; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<h1>DVD Batch Lookup</h1>
+<p class="subtitle">Paste a list of DVD titles, look them all up at once, check the results, then save the ones you want into the sheet — formatted for a straight CSV import into Librarika.</p>
+
+<!-- ============ PIN entry ============ -->
+<div id="pinCard" class="card hidden">
+  <p>Enter the shared PIN to use this tool. Saved on this device so you won't need to enter it again.</p>
+  <label for="pinInput">PIN</label>
+  <input type="password" id="pinInput" inputmode="numeric" autocomplete="off">
+  <button class="primary" onclick="savePin()">Continue</button>
+  <div id="pinError" class="error hidden"></div>
+</div>
+
+<!-- ============ Input ============ -->
+<div id="inputCard" class="card hidden">
+  <label for="titlesInput">DVD titles — one per line</label>
+  <textarea id="titlesInput" placeholder="Jaws&#10;The Matrix&#10;Amelie"></textarea>
+
+  <label for="defaultLocation">Default location for this batch (optional — applied to every row, editable per item)</label>
+  <input type="text" id="defaultLocation" placeholder="e.g. Shelf 3, Box B">
+
+  <button class="primary" onclick="lookupAll()">Look up all</button>
+  <button class="link" onclick="changePin()">Change PIN</button>
+  <div id="lookupError" class="error hidden"></div>
+</div>
+
+<!-- ============ Working ============ -->
+<div id="workingCard" class="card hidden">
+  <p class="status" id="workingText">Looking up…</p>
+</div>
+
+<!-- ============ Results table ============ -->
+<div id="resultsCard" class="card hidden">
+  <p class="status" id="resultsSummary"></p>
+  <div class="table-wrap">
+    <table id="resultsTable">
+      <thead>
+        <tr>
+          <th>Save?</th>
+          <th>Title</th>
+          <th>Director</th>
+          <th>Cast</th>
+          <th>Genre</th>
+          <th>Year</th>
+          <th>Studio</th>
+          <th>Location</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+  <button class="primary" onclick="saveChecked()">Save checked rows</button>
+  <button class="secondary" onclick="startOver()">Start a new batch</button>
+  <div id="saveSummary" class="status"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------
+// Fill in the Web App URL for THIS DVD tool's Apps Script deployment
+// (a separate deployment from the main scan.html one — see SETUP-DVD.md).
+// ---------------------------------------------------------------------
+const BACKEND_URL = 'https://script.google.com/macros/s/AKfycby6IL5f66gSGJaic73XKADLelOdI_YxRWNIndxOy8HJnBgPZL4z6KK1aZlBnWXb8ifshA/exec';
+
+let pin = null;
+let rows = []; // working set of looked-up/edited rows
+
+function $(id) { return document.getElementById(id); }
+function show(id) { $(id).classList.remove('hidden'); }
+function hide(id) { $(id).classList.add('hidden'); }
+function hideAllCards() {
+  ['pinCard', 'inputCard', 'workingCard', 'resultsCard'].forEach(hide);
+}
+
+// ---- PIN handling -----------------------------------------------------
+
+function init() {
+  pin = localStorage.getItem('dvd_batch_pin');
+  if (pin) {
+    hideAllCards();
+    show('inputCard');
+  } else {
+    hideAllCards();
+    show('pinCard');
+  }
+}
+
+function savePin() {
+  const val = $('pinInput').value.trim();
+  if (!val) return;
+  pin = val;
+  localStorage.setItem('dvd_batch_pin', pin);
+  hide('pinError');
+  hideAllCards();
+  show('inputCard');
+}
+
+function changePin() {
+  localStorage.removeItem('dvd_batch_pin');
+  pin = null;
+  hideAllCards();
+  show('pinCard');
+}
+
+// ---- Backend calls ------------------------------------------------------
+
+async function apiGet(params) {
+  const qs = Object.keys(params)
+    .map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); })
+    .join('&');
+  const resp = await fetch(BACKEND_URL + '?' + qs);
+  return resp.json();
+}
+
+// ---- Lookup ------------------------------------------------------
+
+async function lookupAll() {
+  const titles = $('titlesInput').value.trim();
+  if (!titles) return;
+  hide('lookupError');
+  hideAllCards();
+  show('workingCard');
+  $('workingText').textContent = 'Looking up titles — this can take a little while for a long list…';
+
+  let data;
+  try {
+    data = await apiGet({ action: 'lookupBatch', titles: titles, pin: pin });
+  } catch (err) {
+    hideAllCards();
+    show('inputCard');
+    $('lookupError').textContent = 'Lookup failed — check your connection and try again.';
+    show('lookupError');
+    return;
+  }
+
+  if (data.error === 'bad_pin') {
+    alert('That PIN was rejected by the backend. Use "Change PIN" to re-enter it.');
+    hideAllCards();
+    show('inputCard');
+    return;
+  }
+
+  if (!data.ok) {
+    hideAllCards();
+    show('inputCard');
+    $('lookupError').textContent = 'Lookup failed: ' + (data.error || 'unknown error');
+    show('lookupError');
+    return;
+  }
+
+  const defaultLocation = $('defaultLocation').value.trim();
+  rows = data.results.map(function (r) {
+    const matched = !r.error;
+    return {
+      queryTitle: r.queryTitle,
+      matchedTitle: r.matchedTitle || '',
+      title: matched ? (r.matchedTitle || r.queryTitle) : r.queryTitle,
+      director: r.director || '',
+      cast: r.cast || '',
+      genre: r.genre || '',
+      year: r.year || '',
+      studio: r.studio || '',
+      location: defaultLocation,
+      overview: r.overview || '',
+      tmdbUrl: r.tmdbId ? ('https://www.themoviedb.org/movie/' + r.tmdbId) : '',
+      remarks: matched ? 'Looked up via TMDB (auto)' : 'No TMDB match — check by hand before saving',
+      error: r.error || null,
+      included: matched, // rows with no match start unchecked — nothing to review yet
+      status: 'pending' // pending | saving | saved | duplicate | failed
+    };
+  });
+
+  renderResults();
+}
+
+function renderResults() {
+  hideAllCards();
+  show('resultsCard');
+  const matchedCount = rows.filter(function (r) { return !r.error; }).length;
+  $('resultsSummary').textContent = matchedCount + ' of ' + rows.length + ' titles matched on TMDB. ' +
+    'Check the details below (especially any row highlighted as unmatched) before saving.';
+
+  const tbody = $('resultsBody');
+  tbody.innerHTML = '';
+  rows.forEach(function (r, i) {
+    const tr = document.createElement('tr');
+    if (r.error) tr.classList.add('row-error');
+    if (r.status === 'saved' || r.status === 'duplicate') tr.classList.add('row-saved');
+
+    tr.appendChild(cellCheckbox(i));
+    tr.appendChild(cellTitle(i));
+    tr.appendChild(cellInput(i, 'director'));
+    tr.appendChild(cellInput(i, 'cast'));
+    tr.appendChild(cellInput(i, 'genre'));
+    tr.appendChild(cellInput(i, 'year'));
+    tr.appendChild(cellInput(i, 'studio'));
+    tr.appendChild(cellInput(i, 'location'));
+    tr.appendChild(cellStatus(i));
+
+    tbody.appendChild(tr);
+  });
+}
+
+function cellCheckbox(i) {
+  const td = document.createElement('td');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = rows[i].included;
+  cb.onchange = function () { rows[i].included = cb.checked; };
+  td.appendChild(cb);
+  return td;
+}
+
+function cellTitle(i) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = rows[i].title;
+  input.oninput = function () { rows[i].title = input.value; };
+  td.appendChild(input);
+  if (rows[i].error) {
+    const note = document.createElement('div');
+    note.className = 'queried';
+    note.textContent = 'Typed: "' + rows[i].queryTitle + '" — ' +
+      (rows[i].error === 'no_match' ? 'no TMDB match' : 'lookup error');
+    td.appendChild(note);
+  } else if (rows[i].matchedTitle && rows[i].matchedTitle !== rows[i].queryTitle) {
+    const note = document.createElement('div');
+    note.className = 'queried';
+    note.textContent = 'You typed: "' + rows[i].queryTitle + '"';
+    td.appendChild(note);
+  }
+  return td;
+}
+
+function cellInput(i, field) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = rows[i][field];
+  input.oninput = function () { rows[i][field] = input.value; };
+  td.appendChild(input);
+  return td;
+}
+
+function cellStatus(i) {
+  const td = document.createElement('td');
+  td.className = 'row-status';
+  const labels = {
+    pending: rows[i].error ? '⚠ unmatched' : '',
+    saving: 'Saving…',
+    saved: '✓ saved',
+    duplicate: '= already in sheet',
+    failed: '✗ failed'
+  };
+  td.textContent = labels[rows[i].status] || '';
+  return td;
+}
+
+// ---- Save ------------------------------------------------------
+
+async function saveChecked() {
+  const toSave = rows.map(function (r, i) { return { row: r, index: i }; })
+    .filter(function (x) { return x.row.included && x.row.status !== 'saved' && x.row.status !== 'duplicate'; });
+
+  if (toSave.length === 0) {
+    $('saveSummary').textContent = 'Nothing checked to save.';
+    return;
+  }
+
+  let saved = 0, duplicates = 0, failed = 0;
+  for (const item of toSave) {
+    const r = item.row;
+    r.status = 'saving';
+    renderResults();
+    try {
+      const data = await apiGet({
+        action: 'add', pin: pin,
+        title: r.title, director: r.director, cast: r.cast, genre: r.genre,
+        year: r.year, studio: r.studio, location: r.location,
+        overview: r.overview, tmdbUrl: r.tmdbUrl, remarks: r.remarks
+      });
+      if (data.error === 'bad_pin') {
+        alert('That PIN was rejected by the backend. Use "Change PIN" to re-enter it.');
+        return;
+      }
+      if (data.ok && data.duplicate) {
+        r.status = 'duplicate'; duplicates++;
+      } else if (data.ok) {
+        r.status = 'saved'; saved++;
+      } else {
+        r.status = 'failed'; failed++;
+      }
+    } catch (err) {
+      r.status = 'failed'; failed++;
+    }
+    renderResults();
+  }
+
+  $('saveSummary').textContent = 'Saved ' + saved + ', already in sheet ' + duplicates +
+    (failed ? ', failed ' + failed + ' (try those again)' : '') + '.';
+}
+
+function startOver() {
+  rows = [];
+  $('titlesInput').value = '';
+  hideAllCards();
+  show('inputCard');
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
