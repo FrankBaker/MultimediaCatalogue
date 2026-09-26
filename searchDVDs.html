@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DVD Search</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --card: #ffffff; --text: #1a1a1a; --muted: #6b6b6b;
+    --accent: #2f6f4f; --accent-dark: #234f38; --border: #e0e0e0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 16px;
+    max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p.subtitle { color: var(--muted); margin: 0 0 16px; font-size: 14px; line-height: 1.4; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], select {
+    width: 100%; padding: 10px; font-size: 15px; border: 1px solid var(--border);
+    border-radius: 8px; background: #fff; font-family: inherit;
+  }
+  .filter-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px;
+  }
+  @media (max-width: 480px) {
+    .filter-grid { grid-template-columns: 1fr; }
+  }
+  button {
+    font-size: 14px; padding: 9px 14px; border-radius: 8px; border: none;
+    cursor: pointer; margin-top: 12px;
+  }
+  button.link { background: none; color: var(--accent); text-decoration: underline; padding: 4px 0; margin-top: 8px; }
+  .status { font-size: 14px; color: var(--muted); margin: 4px 0 12px; }
+  .error { color: #b3261e; font-size: 14px; margin: 8px 0; }
+  .hidden { display: none; }
+  .results { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 640px) {
+    .results { grid-template-columns: 1fr; }
+  }
+  .item {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .item h3 { margin: 0 0 6px; font-size: 15px; }
+  .item .meta { font-size: 13px; color: var(--muted); margin: 2px 0; }
+  .item .location { font-size: 13px; color: var(--accent-dark); font-weight: 600; margin-top: 8px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>DVD Search</h1>
+<p class="subtitle">Search the DVDs catalogued so far. This reads the working staging sheet directly — no login needed.</p>
+
+<div class="card">
+  <label for="titleSearch">Title contains</label>
+  <input type="text" id="titleSearch" placeholder="e.g. matrix" autocomplete="off">
+
+  <div class="filter-grid">
+    <div>
+      <label for="genreFilter">Genre</label>
+      <select id="genreFilter"><option value="">Any genre</option></select>
+    </div>
+    <div>
+      <label for="yearFilter">Year</label>
+      <select id="yearFilter"><option value="">Any year</option></select>
+    </div>
+    <div>
+      <label for="directorFilter">Director</label>
+      <select id="directorFilter"><option value="">Any director</option></select>
+    </div>
+    <div>
+      <label for="actorFilter">Actor</label>
+      <select id="actorFilter"><option value="">Any actor</option></select>
+    </div>
+  </div>
+
+  <button class="link" onclick="clearFilters()">Clear all filters</button>
+</div>
+
+<p class="status" id="resultsSummary">Loading…</p>
+<div id="errorBox" class="error hidden"></div>
+<div id="results" class="results"></div>
+
+<script>
+// ---------------------------------------------------------------------
+// Same DVD-batch backend as scanDVDs.html — fill in with the same Web
+// App URL from SETUP-DVD.md step 5. This page only ever calls the
+// read-only "list" action, which needs no PIN.
+// ---------------------------------------------------------------------
+const BACKEND_URL = 'PASTE_YOUR_DVD_BACKEND_URL_HERE';
+
+let allItems = [];
+
+function $(id) { return document.getElementById(id); }
+
+function splitMulti(value) {
+  return String(value || '')
+    .split(';')
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+}
+
+async function init() {
+  try {
+    const resp = await fetch(BACKEND_URL + '?action=list');
+    const data = await resp.json();
+    if (!data.ok) {
+      showError('Could not load the catalogue: ' + (data.error || 'unknown error'));
+      return;
+    }
+    allItems = data.items || [];
+    populateFilters();
+    render();
+  } catch (err) {
+    showError('Could not reach the catalogue backend — check your connection and reload.');
+  }
+
+  ['input', 'change'].forEach(function (evt) {
+    $('titleSearch').addEventListener(evt, render);
+    $('genreFilter').addEventListener(evt, render);
+    $('yearFilter').addEventListener(evt, render);
+    $('directorFilter').addEventListener(evt, render);
+    $('actorFilter').addEventListener(evt, render);
+  });
+}
+
+function showError(msg) {
+  $('errorBox').textContent = msg;
+  $('errorBox').classList.remove('hidden');
+  $('resultsSummary').textContent = '';
+}
+
+function populateFilters() {
+  const genres = new Set(), directors = new Set(), actors = new Set(), years = new Set();
+  allItems.forEach(function (item) {
+    splitMulti(item['Subject']).forEach(function (g) { genres.add(g); });
+    splitMulti(item['Authors']).forEach(function (d) { directors.add(d); });
+    splitMulti(item['Co-authors']).forEach(function (a) { actors.add(a); });
+    if (item['Year']) years.add(String(item['Year']));
+  });
+  fillSelect('genreFilter', Array.from(genres).sort());
+  fillSelect('directorFilter', Array.from(directors).sort());
+  fillSelect('actorFilter', Array.from(actors).sort());
+  fillSelect('yearFilter', Array.from(years).sort().reverse());
+}
+
+function fillSelect(id, values) {
+  const sel = $(id);
+  values.forEach(function (v) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v;
+    sel.appendChild(opt);
+  });
+}
+
+function clearFilters() {
+  $('titleSearch').value = '';
+  $('genreFilter').value = '';
+  $('yearFilter').value = '';
+  $('directorFilter').value = '';
+  $('actorFilter').value = '';
+  render();
+}
+
+function render() {
+  const q = $('titleSearch').value.trim().toLowerCase();
+  const genre = $('genreFilter').value;
+  const year = $('yearFilter').value;
+  const director = $('directorFilter').value;
+  const actor = $('actorFilter').value;
+
+  const matches = allItems.filter(function (item) {
+    if (q && !String(item['Title'] || '').toLowerCase().includes(q)) return false;
+    if (genre && splitMulti(item['Subject']).indexOf(genre) === -1) return false;
+    if (year && String(item['Year']) !== year) return false;
+    if (director && splitMulti(item['Authors']).indexOf(director) === -1) return false;
+    if (actor && splitMulti(item['Co-authors']).indexOf(actor) === -1) return false;
+    return true;
+  });
+
+  $('resultsSummary').textContent = allItems.length === 0
+    ? 'No DVDs catalogued yet.'
+    : matches.length + ' of ' + allItems.length + ' DVDs shown.';
+
+  const container = $('results');
+  container.innerHTML = '';
+  if (matches.length === 0 && allItems.length > 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No matches — try clearing a filter.';
+    container.appendChild(empty);
+    return;
+  }
+
+  matches.forEach(function (item) {
+    container.appendChild(renderItem(item));
+  });
+}
+
+function renderItem(item) {
+  const div = document.createElement('div');
+  div.className = 'item';
+
+  const h3 = document.createElement('h3');
+  h3.textContent = item['Title'] || '(untitled)';
+  div.appendChild(h3);
+
+  const lines = [
+    ['Director', item['Authors']],
+    ['Cast', item['Co-authors']],
+    ['Genre', item['Subject']],
+    ['Year', item['Year']],
+    ['Studio', item['Publisher']]
+  ];
+  lines.forEach(function (pair) {
+    if (!pair[1]) return;
+    const p = document.createElement('div');
+    p.className = 'meta';
+    p.textContent = pair[0] + ': ' + pair[1];
+    div.appendChild(p);
+  });
+
+  if (item['Location']) {
+    const loc = document.createElement('div');
+    loc.className = 'location';
+    loc.textContent = '📍 ' + item['Location'];
+    div.appendChild(loc);
+  }
+
+  return div;
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
