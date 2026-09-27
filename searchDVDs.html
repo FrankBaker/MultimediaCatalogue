@@ -97,7 +97,7 @@
 // App URL from SETUP-DVD.md step 5. This page only ever calls the
 // read-only "list" action, which needs no PIN.
 // ---------------------------------------------------------------------
-const BACKEND_URL = 'https://script.google.com/macros/s/AKfycby6IL5f66gSGJaic73XKADLelOdI_YxRWNIndxOy8HJnBgPZL4z6KK1aZlBnWXb8ifshA/exec';
+const BACKEND_URL = 'PASTE_YOUR_DVD_BACKEND_URL_HERE';
 
 let allItems = [];
 
@@ -119,7 +119,6 @@ async function init() {
       return;
     }
     allItems = data.items || [];
-    populateFilters();
     render();
   } catch (err) {
     showError('Could not reach the catalogue backend — check your connection and reload.');
@@ -140,28 +139,49 @@ function showError(msg) {
   $('resultsSummary').textContent = '';
 }
 
-function populateFilters() {
-  const genres = new Set(), directors = new Set(), actors = new Set(), years = new Set();
-  allItems.forEach(function (item) {
-    splitMulti(item['Subject']).forEach(function (g) { genres.add(g); });
-    splitMulti(item['Authors']).forEach(function (d) { directors.add(d); });
-    splitMulti(item['Co-authors']).forEach(function (a) { actors.add(a); });
-    if (item['Year']) years.add(String(item['Year']));
-  });
-  fillSelect('genreFilter', Array.from(genres).sort());
-  fillSelect('directorFilter', Array.from(directors).sort());
-  fillSelect('actorFilter', Array.from(actors).sort());
-  fillSelect('yearFilter', Array.from(years).sort().reverse());
+// Does this item satisfy filter set f? Any field left as '' in f is not
+// constrained. f: { text, genre, year, director, actor }
+function itemMatches(item, f) {
+  if (f.text && !String(item['Title'] || '').toLowerCase().includes(f.text)) return false;
+  if (f.genre && splitMulti(item['Subject']).indexOf(f.genre) === -1) return false;
+  if (f.year && String(item['Year']) !== f.year) return false;
+  if (f.director && splitMulti(item['Authors']).indexOf(f.director) === -1) return false;
+  if (f.actor && splitMulti(item['Co-authors']).indexOf(f.actor) === -1) return false;
+  return true;
 }
 
-function fillSelect(id, values) {
+// The values available for one dropdown, given the CURRENT state of every
+// OTHER filter (not this one's own selection) — this is what makes the
+// filters progressive: picking a genre narrows what shows up in the
+// director/actor/year dropdowns, and vice versa.
+function optionsFor(field, raw) {
+  const relaxed = Object.assign({}, raw);
+  relaxed[field] = ''; // this field itself is unconstrained while computing its own options
+  const subset = allItems.filter(function (item) { return itemMatches(item, relaxed); });
+  const values = new Set();
+  subset.forEach(function (item) {
+    if (field === 'genre') splitMulti(item['Subject']).forEach(function (v) { values.add(v); });
+    else if (field === 'director') splitMulti(item['Authors']).forEach(function (v) { values.add(v); });
+    else if (field === 'actor') splitMulti(item['Co-authors']).forEach(function (v) { values.add(v); });
+    else if (field === 'year') { if (item['Year']) values.add(String(item['Year'])); }
+  });
+  return Array.from(values);
+}
+
+function rebuildSelect(id, anyLabel, values, selectedValue) {
   const sel = $(id);
+  sel.innerHTML = '';
+  const anyOpt = document.createElement('option');
+  anyOpt.value = '';
+  anyOpt.textContent = anyLabel;
+  sel.appendChild(anyOpt);
   values.forEach(function (v) {
     const opt = document.createElement('option');
     opt.value = v;
     opt.textContent = v;
     sel.appendChild(opt);
   });
+  sel.value = selectedValue; // if selectedValue isn't among the options, this leaves "" (Any) selected
 }
 
 function clearFilters() {
@@ -174,20 +194,37 @@ function clearFilters() {
 }
 
 function render() {
-  const q = $('titleSearch').value.trim().toLowerCase();
-  const genre = $('genreFilter').value;
-  const year = $('yearFilter').value;
-  const director = $('directorFilter').value;
-  const actor = $('actorFilter').value;
+  const raw = {
+    text: $('titleSearch').value.trim().toLowerCase(),
+    genre: $('genreFilter').value,
+    year: $('yearFilter').value,
+    director: $('directorFilter').value,
+    actor: $('actorFilter').value
+  };
 
-  const matches = allItems.filter(function (item) {
-    if (q && !String(item['Title'] || '').toLowerCase().includes(q)) return false;
-    if (genre && splitMulti(item['Subject']).indexOf(genre) === -1) return false;
-    if (year && String(item['Year']) !== year) return false;
-    if (director && splitMulti(item['Authors']).indexOf(director) === -1) return false;
-    if (actor && splitMulti(item['Co-authors']).indexOf(actor) === -1) return false;
-    return true;
-  });
+  // Recompute each dropdown's own option list from the other active filters.
+  const genreOptions = optionsFor('genre', raw).sort();
+  const yearOptions = optionsFor('year', raw).sort().reverse();
+  const directorOptions = optionsFor('director', raw).sort();
+  const actorOptions = optionsFor('actor', raw).sort();
+
+  // If a selection is no longer possible given the other filters (e.g. a
+  // previously-picked director has no titles left once a genre is chosen),
+  // drop it back to "Any" rather than silently filtering to zero results.
+  const kept = {
+    text: raw.text,
+    genre: genreOptions.indexOf(raw.genre) !== -1 ? raw.genre : '',
+    year: yearOptions.indexOf(raw.year) !== -1 ? raw.year : '',
+    director: directorOptions.indexOf(raw.director) !== -1 ? raw.director : '',
+    actor: actorOptions.indexOf(raw.actor) !== -1 ? raw.actor : ''
+  };
+
+  rebuildSelect('genreFilter', 'Any genre', genreOptions, kept.genre);
+  rebuildSelect('yearFilter', 'Any year', yearOptions, kept.year);
+  rebuildSelect('directorFilter', 'Any director', directorOptions, kept.director);
+  rebuildSelect('actorFilter', 'Any actor', actorOptions, kept.actor);
+
+  const matches = allItems.filter(function (item) { return itemMatches(item, kept); });
 
   $('resultsSummary').textContent = allItems.length === 0
     ? 'No DVDs catalogued yet.'
