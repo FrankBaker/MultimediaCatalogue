@@ -23,18 +23,25 @@
       overflow: hidden;
       min-height: 60px;
     }
-    .controls { margin: 16px 0; display: flex; gap: 12px; justify-content: center; }
-    button {
+    .controls { margin: 16px 0 8px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    button, .filebtn {
       font-size: 1rem;
-      padding: 12px 22px;
+      padding: 12px 18px;
       border: none;
       border-radius: 8px;
       background: #0a7cff;
       color: #fff;
+      font-family: inherit;
+      cursor: pointer;
     }
     button:disabled { background: #b8c4d0; }
     #stopBtn { background: #555; }
-    #status { color: #666; font-size: 0.95rem; min-height: 1.4em; }
+    .filebtn { background: #2e9d57; }
+    #fileInput { display: none; }
+    #zoomRow { display: none; max-width: 500px; margin: 8px auto; align-items: center; gap: 10px; }
+    #zoomRow input { flex: 1; }
+    #status { color: #666; font-size: 0.95rem; min-height: 1.4em; margin-top: 6px; }
+    #diag { color: #999; font-size: 0.75rem; min-height: 1em; margin-top: 4px; }
     #result {
       margin: 16px auto 0;
       max-width: 500px;
@@ -47,6 +54,7 @@
     #result .format { display: block; font-size: 0.85rem; color: #666; margin-top: 4px; }
     #history { max-width: 500px; margin: 12px auto; padding: 0; list-style: none; text-align: left; font-size: 0.9rem; color: #444; }
     #history li { padding: 4px 0; border-bottom: 1px solid #ddd; }
+    #fileReader { display: none; }
   </style>
 </head>
 <body>
@@ -55,33 +63,52 @@
 
   <div id="reader"></div>
 
+  <div id="zoomRow">
+    <span>Zoom</span>
+    <input id="zoom" type="range" min="1" max="1" step="0.1" value="1">
+    <span id="zoomVal">1.0x</span>
+  </div>
+
   <div class="controls">
     <button id="startBtn">Start camera</button>
     <button id="stopBtn" disabled>Stop</button>
+    <label class="filebtn" for="fileInput">Scan from photo</label>
+    <input id="fileInput" type="file" accept="image/*" capture="environment">
   </div>
   <div id="status">Tap "Start camera" and point it at a barcode.</div>
+  <div id="diag"></div>
 
   <div id="result">Scan result will show here</div>
   <ul id="history"></ul>
+  <div id="fileReader"></div>
 
-  <!-- html5-qrcode library, pinned to a known version -->
+  <!-- Modern barcode decoder (zxing-cpp compiled to WebAssembly), exposed through the
+       standard BarcodeDetector interface. iPhone Safari has no usable built-in barcode
+       detector, and html5-qrcode's own bundled decoder misses many real-world 1D barcodes. -->
+  <script src="https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/iife/ponyfill.js"></script>
+  <!-- html5-qrcode library (camera handling + UI), pinned to a known version -->
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <script>
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusEl = document.getElementById('status');
+    const diagEl = document.getElementById('diag');
     const resultEl = document.getElementById('result');
     const historyEl = document.getElementById('history');
+    const zoomRow = document.getElementById('zoomRow');
+    const zoomEl = document.getElementById('zoom');
+    const zoomVal = document.getElementById('zoomVal');
+    const fileInput = document.getElementById('fileInput');
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
     // The camera only works on a secure page (https:// or localhost).
-    // On an iPhone, opening the file directly or over plain http won't work.
     if (!window.isSecureContext) {
-      setStatus('Camera needs a secure page (https:// or localhost). Open this page over https.');
+      setStatus('Camera needs a secure page (https:// or localhost). "Scan from photo" still works.');
     }
 
-    if (typeof Html5Qrcode === 'undefined') {
+    const libLoaded = typeof Html5Qrcode !== 'undefined';
+    if (!libLoaded) {
       setStatus('Could not load the scanner library (no internet connection?).');
       startBtn.disabled = true;
     }
@@ -93,10 +120,58 @@
       F.CODE_93, F.ITF, F.CODABAR, F.QR_CODE
     ].filter(f => f !== undefined);
 
+    // Decoder choice, best first:
+    //  1. the browser's own BarcodeDetector, if it really reads shop barcodes
+    //     (Chrome on Mac/Android). Some Safari versions expose one that can't
+    //     read EAN/UPC -- it must not be used then.
+    //  2. zxing-cpp (WebAssembly) via the barcode-detector package -- what an
+    //     iPhone gets. Installed as window.BarcodeDetector so html5-qrcode uses it.
+    //  3. html5-qrcode's own bundled decoder, only if nothing else loaded. It
+    //     reads clean on-screen barcodes but misses many real-world ones.
+    async function nativeDetectorUsable() {
+      try {
+        if (!('BarcodeDetector' in window) || !BarcodeDetector.getSupportedFormats) return false;
+        const supported = await BarcodeDetector.getSupportedFormats();
+        return ['ean_13', 'upc_a', 'code_128'].every(f => supported.includes(f));
+      } catch (e) {
+        return false;
+      }
+    }
+
+    let decoderPromise = null;
+    function chooseDecoder() {
+      if (!decoderPromise) decoderPromise = (async () => {
+        if (await nativeDetectorUsable()) return { name: 'built-in BarcodeDetector', useDetector: true };
+        if (window.BarcodeDetectionAPI && BarcodeDetectionAPI.BarcodeDetector) {
+          try {
+            Object.defineProperty(window, 'BarcodeDetector', {
+              value: BarcodeDetectionAPI.BarcodeDetector, configurable: true, writable: true
+            });
+            // Start downloading the decoder now rather than on the first frame.
+            if (BarcodeDetectionAPI.prepareZXingModule) {
+              try { BarcodeDetectionAPI.prepareZXingModule({ fireImmediately: true }); } catch (e) {}
+            }
+            return { name: 'zxing-cpp (WebAssembly)', useDetector: true };
+          } catch (e) { /* fall through */ }
+        }
+        return { name: 'ZXing (basic, bundled)', useDetector: false };
+      })();
+      return decoderPromise;
+    }
+
+    function scannerConfig(useDetector) {
+      return {
+        formatsToSupport: formats,
+        experimentalFeatures: { useBarCodeDetectorIfSupported: useDetector },
+        verbose: false
+      };
+    }
+
     let html5QrCode = null;
+    let decoderName = '';
     let lastText = null;
 
-    function onScanSuccess(decodedText, decodedResult) {
+    function showResult(decodedText, decodedResult, source) {
       const format = decodedResult && decodedResult.result && decodedResult.result.format
         ? decodedResult.result.format.formatName : '';
       resultEl.innerHTML = '';
@@ -104,16 +179,20 @@
       if (format) {
         const f = document.createElement('span');
         f.className = 'format';
-        f.textContent = format;
+        f.textContent = format + (source ? ' - ' + source : '');
         resultEl.append(f);
       }
-      if (decodedText !== lastText) {
+      if (decodedText !== lastText || source === 'photo') {
         lastText = decodedText;
         const li = document.createElement('li');
         li.textContent = new Date().toLocaleTimeString() + '  ' + decodedText + (format ? '  (' + format + ')' : '');
         historyEl.prepend(li);
         if (navigator.vibrate) navigator.vibrate(100);
       }
+    }
+
+    function onScanSuccess(decodedText, decodedResult) {
+      showResult(decodedText, decodedResult, 'camera');
       // To stop after the first successful scan, uncomment:
       // stopScanner();
     }
@@ -122,17 +201,51 @@
       // Called for every frame without a readable code -- safe to ignore.
     }
 
+    function updateDiagnostics() {
+      try {
+        const s = html5QrCode.getRunningTrackSettings();
+        const parts = [];
+        if (s.width && s.height) parts.push('video ' + s.width + 'x' + s.height);
+        parts.push('decoder: ' + decoderName);
+        if (s.zoom) parts.push('zoom ' + Number(s.zoom).toFixed(1) + 'x');
+        diagEl.textContent = parts.join('  |  ');
+      } catch (e) {
+        diagEl.textContent = 'decoder: ' + decoderName;
+      }
+    }
+
+    function setupZoom() {
+      zoomRow.style.display = 'none';
+      let caps;
+      try { caps = html5QrCode.getRunningTrackCapabilities(); } catch (e) { return; }
+      if (!caps || !caps.zoom || !(caps.zoom.max > caps.zoom.min)) return;
+      zoomEl.min = caps.zoom.min;
+      zoomEl.max = Math.min(caps.zoom.max, 8);
+      zoomEl.step = caps.zoom.step || 0.1;
+      // iPhone Pro main cameras can't focus close up: start a little zoomed in so
+      // the barcode fills the box while the phone is held ~15-25 cm away.
+      const start = Math.min(Math.max(2, caps.zoom.min), Number(zoomEl.max));
+      zoomEl.value = start;
+      applyZoom(start);
+      zoomRow.style.display = 'flex';
+    }
+
+    function applyZoom(v) {
+      zoomVal.textContent = Number(v).toFixed(1) + 'x';
+      html5QrCode.applyVideoConstraints({ advanced: [{ zoom: Number(v) }] })
+        .then(updateDiagnostics)
+        .catch(() => {});
+    }
+    zoomEl.addEventListener('input', () => applyZoom(zoomEl.value));
+
     async function startScanner() {
       startBtn.disabled = true;
       setStatus('Starting camera...');
       try {
         if (!html5QrCode) {
-          html5QrCode = new Html5Qrcode('reader', {
-            formatsToSupport: formats,
-            // Use the browser's built-in barcode detector where available (faster, better at 1D barcodes).
-            experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-            verbose: false
-          });
+          const dec = await chooseDecoder();
+          decoderName = dec.name;
+          html5QrCode = new Html5Qrcode('reader', scannerConfig(dec.useDetector));
         }
         await html5QrCode.start(
           { facingMode: 'environment' },   // rear camera on phones
@@ -140,15 +253,25 @@
             fps: 10,
             // Wide, short box suits 1D barcodes; scales with the video size.
             qrbox: (w, h) => {
-              const width = Math.floor(Math.min(w * 0.85, 400));
+              const width = Math.floor(Math.min(w * 0.85, 600));
               return { width, height: Math.floor(Math.min(h * 0.5, width * 0.5)) };
+            },
+            // Ask for HD video: Safari's default (often 640x480) leaves too few
+            // pixels across a barcode's thin bars once the box is cropped out.
+            videoConstraints: {
+              facingMode: 'environment',
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              advanced: [{ focusMode: 'continuous' }]
             }
           },
           onScanSuccess,
           onScanFailure
         );
         stopBtn.disabled = false;
-        setStatus('Scanning... hold the barcode inside the box.');
+        setStatus('Scanning... hold the barcode inside the box, about 15-25 cm away.');
+        setupZoom();
+        updateDiagnostics();
       } catch (err) {
         startBtn.disabled = false;
         setStatus('Camera access denied or not supported: ' + err);
@@ -159,10 +282,31 @@
       if (html5QrCode && html5QrCode.isScanning) {
         await html5QrCode.stop();
       }
+      zoomRow.style.display = 'none';
       stopBtn.disabled = true;
       startBtn.disabled = false;
       setStatus('Camera stopped.');
     }
+
+    // Fallback: take a normal photo with the phone's camera app (full
+    // resolution, proper autofocus) and decode that.
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file || !libLoaded) return;
+      setStatus('Reading photo...');
+      try {
+        const dec = await chooseDecoder();
+        decoderName = dec.name;
+        diagEl.textContent = 'decoder: ' + decoderName;
+        const fileScanner = new Html5Qrcode('fileReader', scannerConfig(dec.useDetector));
+        const res = await fileScanner.scanFileV2(file, false);
+        showResult(res.decodedText, res, 'photo');
+        setStatus('Read from photo.');
+      } catch (err) {
+        setStatus('No barcode found in that photo - try again, closer and in focus, barcode filling most of the frame.');
+      }
+      fileInput.value = '';
+    });
 
     startBtn.addEventListener('click', startScanner);
     stopBtn.addEventListener('click', stopScanner);
