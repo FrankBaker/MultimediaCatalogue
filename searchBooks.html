@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Book Search</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --card: #ffffff; --text: #1a1a1a; --muted: #6b6b6b;
+    --accent: #2f6f4f; --accent-dark: #234f38; --border: #e0e0e0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 16px;
+    max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p.subtitle { color: var(--muted); margin: 0 0 16px; font-size: 14px; line-height: 1.4; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], select {
+    width: 100%; padding: 10px; font-size: 15px; border: 1px solid var(--border);
+    border-radius: 8px; background: #fff; font-family: inherit;
+  }
+  .filter-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px;
+  }
+  .filter-grid .wide { grid-column: 1 / -1; }
+  @media (max-width: 480px) {
+    .filter-grid { grid-template-columns: 1fr; }
+  }
+  button {
+    font-size: 14px; padding: 9px 14px; border-radius: 8px; border: none;
+    cursor: pointer; margin-top: 12px;
+  }
+  button.link { background: none; color: var(--accent); text-decoration: underline; padding: 4px 0; margin-top: 8px; }
+  .status { font-size: 14px; color: var(--muted); margin: 4px 0 12px; }
+  .error { color: #b3261e; font-size: 14px; margin: 8px 0; }
+  .hidden { display: none; }
+  .results { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 640px) {
+    .results { grid-template-columns: 1fr; }
+  }
+  .item {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .item h3 { margin: 0 0 6px; font-size: 15px; }
+  .item .meta { font-size: 13px; color: var(--muted); margin: 2px 0; }
+  .item .desc {
+    font-size: 13px; color: var(--text); margin-top: 8px; line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+    cursor: pointer;
+  }
+  .item .desc.open { display: block; -webkit-line-clamp: unset; }
+  .item .location { font-size: 13px; color: var(--accent-dark); font-weight: 600; margin-top: 8px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Book Search</h1>
+<p class="subtitle">Search the library's books. This reads the book_backup sheet directly — no login needed.</p>
+
+<div class="card">
+  <label for="titleSearch">Title contains</label>
+  <input type="text" id="titleSearch" placeholder="e.g. column of fire" autocomplete="off">
+
+  <div class="filter-grid">
+    <div>
+      <label for="genreFilter">Genre</label>
+      <select id="genreFilter"><option value="">Any genre</option></select>
+    </div>
+    <div>
+      <label for="yearFilter">Year</label>
+      <select id="yearFilter"><option value="">Any year</option></select>
+    </div>
+    <div class="wide">
+      <label for="authorFilter">Author</label>
+      <select id="authorFilter"><option value="">Any author</option></select>
+    </div>
+  </div>
+
+  <button class="link" onclick="clearFilters()">Clear all filters</button>
+</div>
+
+<p class="status" id="resultsSummary">Loading…</p>
+<div id="errorBox" class="error hidden"></div>
+<div id="results" class="results"></div>
+
+<script>
+// ---------------------------------------------------------------------
+// SETUP: paste the ID of the book_backup Google Sheet below. It is the
+// long string in the sheet's address between /d/ and /edit, e.g.
+//   https://docs.google.com/spreadsheets/d/THIS_PART_HERE/edit
+// The sheet must be shared as "Anyone with the link — Viewer".
+// SHEET_TAB is the tab name at the bottom of the sheet; leave '' to use
+// the first tab.
+// ---------------------------------------------------------------------
+const SHEET_ID = '1UeetnXOaJJZi2LSOBhODBDUiL9HnNnBHRV6-yP9bZS0';
+const SHEET_TAB = '';
+
+// Which sheet columns feed each search field. Several columns can be
+// listed; their values are merged. Multiple values in one cell may be
+// separated by ; or , (e.g. "Historical; Thriller").
+const COLUMNS = {
+  title:  'Title',
+  genre:  ['Tags', 'Subject'],
+  author: ['Authors', 'Co-authors'],
+  year:   'Year',
+  desc:   'Description',
+  callNo: 'Call No'
+};
+
+let allItems = [];
+
+function $(id) { return document.getElementById(id); }
+
+function cell(item, col) { return String(item[col] == null ? '' : item[col]).trim(); }
+
+function splitMulti(value) {
+  return String(value || '')
+    .split(/[;,]/)
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+}
+
+function multiValues(item, cols) {
+  const out = [];
+  cols.forEach(function (c) {
+    splitMulti(cell(item, c)).forEach(function (v) { if (out.indexOf(v) === -1) out.push(v); });
+  });
+  return out;
+}
+
+// Normalise year: Sheets may hand back 2023 as "2023.0" or "2023.00".
+function yearOf(item) {
+  return cell(item, COLUMNS.year).replace(/\.0+$/, '');
+}
+
+// Minimal but complete CSV parser (handles quotes, commas and line
+// breaks inside descriptions).
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (c !== '\r') field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+async function init() {
+  try {
+    let url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID +
+              '/gviz/tq?tqx=out:csv&headers=1';
+    if (SHEET_TAB) url += '&sheet=' + encodeURIComponent(SHEET_TAB);
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const text = await resp.text();
+    if (text.trim().charAt(0) === '<') {
+      showError('The sheet is not shared publicly. In Google Sheets choose Share → General access → "Anyone with the link" → Viewer.');
+      return;
+    }
+    const rows = parseCSV(text);
+    const headers = (rows.shift() || []).map(function (h) { return h.trim(); });
+    allItems = rows
+      .map(function (r) {
+        const o = {};
+        headers.forEach(function (h, i) { o[h] = r[i]; });
+        return o;
+      })
+      .filter(function (o) {
+        // Skip blank rows and books marked inactive (withdrawn/lost).
+        return cell(o, COLUMNS.title) && cell(o, 'Is Active').toLowerCase() !== 'no';
+      })
+      .sort(function (a, b) {
+        return sortKey(cell(a, COLUMNS.title)).localeCompare(sortKey(cell(b, COLUMNS.title)));
+      });
+    render();
+  } catch (err) {
+    showError('Could not load the book catalogue — check your connection and reload.');
+  }
+
+  ['input', 'change'].forEach(function (evt) {
+    $('titleSearch').addEventListener(evt, render);
+    $('genreFilter').addEventListener(evt, render);
+    $('yearFilter').addEventListener(evt, render);
+    $('authorFilter').addEventListener(evt, render);
+  });
+}
+
+// Sort "A Column of Fire" under C, "The Hobbit" under H.
+function sortKey(title) {
+  return title.toLowerCase().replace(/^(the|a|an)\s+/, '');
+}
+
+function showError(msg) {
+  $('errorBox').textContent = msg;
+  $('errorBox').classList.remove('hidden');
+  $('resultsSummary').textContent = '';
+}
+
+// Does this item satisfy filter set f? Any field left as '' in f is not
+// constrained. f: { text, genre, year, author }
+function itemMatches(item, f) {
+  if (f.text && cell(item, COLUMNS.title).toLowerCase().indexOf(f.text) === -1) return false;
+  if (f.genre && multiValues(item, COLUMNS.genre).indexOf(f.genre) === -1) return false;
+  if (f.year && yearOf(item) !== f.year) return false;
+  if (f.author && multiValues(item, COLUMNS.author).indexOf(f.author) === -1) return false;
+  return true;
+}
+
+// The values available for one dropdown, given the CURRENT state of every
+// OTHER filter (not this one's own selection) — this is what makes the
+// filters progressive: picking a genre narrows the author/year dropdowns,
+// and vice versa.
+function optionsFor(field, raw) {
+  const relaxed = Object.assign({}, raw);
+  relaxed[field] = '';
+  const subset = allItems.filter(function (item) { return itemMatches(item, relaxed); });
+  const values = new Set();
+  subset.forEach(function (item) {
+    if (field === 'genre') multiValues(item, COLUMNS.genre).forEach(function (v) { values.add(v); });
+    else if (field === 'author') multiValues(item, COLUMNS.author).forEach(function (v) { values.add(v); });
+    else if (field === 'year') { const y = yearOf(item); if (y) values.add(y); }
+  });
+  return Array.from(values);
+}
+
+function rebuildSelect(id, anyLabel, values, selectedValue) {
+  const sel = $(id);
+  sel.innerHTML = '';
+  const anyOpt = document.createElement('option');
+  anyOpt.value = '';
+  anyOpt.textContent = anyLabel;
+  sel.appendChild(anyOpt);
+  values.forEach(function (v) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v;
+    sel.appendChild(opt);
+  });
+  sel.value = selectedValue;
+}
+
+function clearFilters() {
+  $('titleSearch').value = '';
+  $('genreFilter').value = '';
+  $('yearFilter').value = '';
+  $('authorFilter').value = '';
+  render();
+}
+
+function byText(a, b) { return a.localeCompare(b, undefined, { sensitivity: 'base' }); }
+
+function render() {
+  const raw = {
+    text: $('titleSearch').value.trim().toLowerCase(),
+    genre: $('genreFilter').value,
+    year: $('yearFilter').value,
+    author: $('authorFilter').value
+  };
+
+  const genreOptions = optionsFor('genre', raw).sort(byText);
+  const yearOptions = optionsFor('year', raw).sort().reverse();
+  const authorOptions = optionsFor('author', raw).sort(byText);
+
+  // Drop a selection back to "Any" if the other filters have made it impossible.
+  const kept = {
+    text: raw.text,
+    genre: genreOptions.indexOf(raw.genre) !== -1 ? raw.genre : '',
+    year: yearOptions.indexOf(raw.year) !== -1 ? raw.year : '',
+    author: authorOptions.indexOf(raw.author) !== -1 ? raw.author : ''
+  };
+
+  rebuildSelect('genreFilter', 'Any genre', genreOptions, kept.genre);
+  rebuildSelect('yearFilter', 'Any year', yearOptions, kept.year);
+  rebuildSelect('authorFilter', 'Any author', authorOptions, kept.author);
+
+  const matches = allItems.filter(function (item) { return itemMatches(item, kept); });
+
+  $('resultsSummary').textContent = allItems.length === 0
+    ? 'No books catalogued yet.'
+    : matches.length + ' of ' + allItems.length + ' books shown.';
+
+  const container = $('results');
+  container.innerHTML = '';
+  if (matches.length === 0 && allItems.length > 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No matches — try clearing a filter.';
+    container.appendChild(empty);
+    return;
+  }
+
+  // Draw at most 300 cards at once so phones stay quick with a big catalogue.
+  matches.slice(0, 300).forEach(function (item) {
+    container.appendChild(renderItem(item));
+  });
+  if (matches.length > 300) {
+    const more = document.createElement('div');
+    more.className = 'empty';
+    more.textContent = 'Showing the first 300 — narrow the search to see the rest.';
+    container.appendChild(more);
+  }
+}
+
+function renderItem(item) {
+  const div = document.createElement('div');
+  div.className = 'item';
+
+  const h3 = document.createElement('h3');
+  h3.textContent = cell(item, COLUMNS.title) || '(untitled)';
+  div.appendChild(h3);
+
+  const lines = [
+    ['Author', multiValues(item, COLUMNS.author).join('; ')],
+    ['Genre', multiValues(item, COLUMNS.genre).join('; ')],
+    ['Year', yearOf(item)]
+  ];
+  lines.forEach(function (pair) {
+    if (!pair[1]) return;
+    const p = document.createElement('div');
+    p.className = 'meta';
+    p.textContent = pair[0] + ': ' + pair[1];
+    div.appendChild(p);
+  });
+
+  const desc = cell(item, COLUMNS.desc);
+  if (desc) {
+    const d = document.createElement('div');
+    d.className = 'desc';
+    d.title = 'Tap to show more or less';
+    d.textContent = desc;
+    d.addEventListener('click', function () { d.classList.toggle('open'); });
+    div.appendChild(d);
+  }
+
+  const callNo = cell(item, COLUMNS.callNo);
+  if (callNo) {
+    const loc = document.createElement('div');
+    loc.className = 'location';
+    loc.textContent = '📍 Shelf: ' + callNo;
+    div.appendChild(loc);
+  }
+
+  return div;
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
