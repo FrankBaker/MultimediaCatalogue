@@ -74,8 +74,8 @@
 
   <div class="filter-grid">
     <div>
-      <label for="genreFilter">Genre</label>
-      <select id="genreFilter"><option value="">Any genre</option></select>
+      <label for="sectionFilter">Section</label>
+      <select id="sectionFilter"><option value="">Any section</option></select>
     </div>
     <div>
       <label for="yearFilter">Year</label>
@@ -107,11 +107,15 @@ const SHEET_ID = '1UeetnXOaJJZi2LSOBhODBDUiL9HnNnBHRV6-yP9bZS0';
 const SHEET_TAB = '';
 
 // Which sheet columns feed each search field. Several columns can be
-// listed; their values are merged. Multiple values in one cell may be
-// separated by ; or , (e.g. "Historical; Thriller").
+// listed; their values are merged. Section is the Category column
+// (ENG FICTION, AFR FIKSIE …). Tags are shown on each result, not searched;
+// several tags in one cell may be separated by ; or ,. Multiple authors in
+// one cell are separated by ; or "and" or "&" (a comma is kept, so
+// "Baldacci, David" stays one author).
 const COLUMNS = {
   title:  'Title',
-  genre:  ['Tags', 'Subject'],
+  section: 'Category',
+  tags:   ['Tags'],
   author: ['Authors', 'Co-authors'],
   year:   'Year',
   desc:   'Description',
@@ -119,14 +123,15 @@ const COLUMNS = {
 };
 
 let allItems = [];
+let authorName = {};   // author key -> the name shown on screen
 
 function $(id) { return document.getElementById(id); }
 
 function cell(item, col) { return String(item[col] == null ? '' : item[col]).trim(); }
 
-function splitMulti(value) {
+function splitMulti(value, separators) {
   return String(value || '')
-    .split(/[;,]/)
+    .split(separators || /[;,]/)
     .map(function (s) { return s.trim(); })
     .filter(function (s) { return s.length > 0; });
 }
@@ -138,6 +143,165 @@ function multiValues(item, cols) {
   });
   return out;
 }
+
+// Remove notes in brackets: "(author)", "(Ed)", "(illus)", "(b. 1940-)".
+function cleanAuthorName(name) {
+  return name.replace(/\([^)]*\)/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').replace(/\s*,\s*,/g, ',');
+}
+
+// ---- Author matching ------------------------------------------------
+// "BALDACCI DAVID", "Baldacci David", "Baldacci, David" and "David Baldacci"
+// all reduce to the same key: lower case, punctuation dropped, words sorted.
+function authorKey(name) {
+  name = cleanAuthorName(name);
+  // web-address style "child-lee" -> "child lee"
+  if (/^[a-z]+(-[a-z]+)+$/.test(name)) name = name.replace(/-/g, ' ');
+  return name.toLowerCase()
+    .replace(/[.,'’"()]/g, ' ')
+    .split(/\s+/).filter(Boolean)
+    .sort().join(' ');
+}
+
+function isAllCaps(s) { return s === s.toUpperCase() && s !== s.toLowerCase(); }
+
+// "BALDACCI DAVID" -> "Baldacci David", "O'BRIEN" -> "O'Brien", "MCEWAN" -> "McEwan".
+// Short letter groups like "PJ" or "R.R." are left as initials.
+function tidyCaps(s) {
+  return s.split(' ').map(function (w) {
+    if (w.replace(/[^A-Za-z]/g, '').length <= 2) return w;
+    return w.toLowerCase()
+      .replace(/(^|[\-'’(.])([a-z])/g, function (m, p, c) { return p + c.toUpperCase(); })
+      .replace(/^Mc([a-z])/, function (m, c) { return 'Mc' + c.toUpperCase(); });
+  }).join(' ');
+}
+
+// Several authors in one cell: "Patterson, James; Paetro, Maxine",
+// "James Patterson and Maxine Paetro", "Clancy, Tom & Greaney, Mark".
+const AUTHOR_SEP = /;|\s+&\s+|\s+and\s+/i;
+
+// Names that mean "no author recorded" — left out of the Author list.
+const NOT_AN_AUTHOR = ['unknown', 'unknown author', 'author unknown'];
+
+// Words that belong with the surname: "Marlena De Blasi" -> "De Blasi, Marlena".
+const SURNAME_PARTICLES = ['de', 'du', 'van', 'von', 'der', 'den', 'le', 'la', 'da', 'di', 'del', 'st', 'st.', 'ten', 'ter'];
+
+// Put any spelling into library style "Surname, Given names".
+//   "Follett, Ken"    -> "Follett, Ken"     (already library style)
+//   "BALDACCI  DAVID" -> "Baldacci, David"  (two spaces = surname first)
+//   "Ken Follett"     -> "Follett, Ken"     (last word = surname)
+function surnameFirst(name) {
+  let surname, given;
+  if (name.indexOf(',') !== -1) {
+    const i = name.indexOf(',');
+    surname = name.slice(0, i); given = name.slice(i + 1);
+  } else if (/\S\s{2,}\S/.test(name)) {
+    const m = name.match(/^(.*?\S)\s{2,}(\S.*)$/);
+    surname = m[1]; given = m[2];
+  } else {
+    const words = name.split(/\s+/);
+    if (words.length === 1) return name;
+    let i = words.length - 1;
+    while (i > 1 && SURNAME_PARTICLES.indexOf(words[i - 1].toLowerCase()) !== -1) i--;
+    surname = words.slice(i).join(' '); given = words.slice(0, i).join(' ');
+  }
+  surname = surname.replace(/\s+/g, ' ').trim();
+  given = given.replace(/\s+/g, ' ').trim();
+  // "John." -> "John", but keep the full stop on initials like "P. D."
+  if (/[A-Za-z]{2,}\.$/.test(given)) given = given.slice(0, -1);
+  return given ? surname + ', ' + given : surname;
+}
+
+function authorsOf(item) {
+  const keys = [];
+  COLUMNS.author.forEach(function (c) {
+    splitMulti(cell(item, c), AUTHOR_SEP).forEach(function (n) {
+      const k = authorKey(n);
+      if (k && NOT_AN_AUTHOR.map(authorKey).indexOf(k) === -1 && keys.indexOf(k) === -1) keys.push(k);
+    });
+  });
+  return keys;
+}
+
+// For each author key, choose one spelling to show, in "Surname, Given"
+// form. Spellings already written with a comma (library style) win, then
+// "SURNAME  GIVEN" with a double space, then "Given Surname"; within each,
+// the most common one that isn't in ALL CAPS.
+function buildAuthorNames(items) {
+  const counts = {};
+  items.forEach(function (item) {
+    COLUMNS.author.forEach(function (c) {
+      splitMulti(cell(item, c), AUTHOR_SEP).forEach(function (n) {
+        const k = authorKey(n);
+        if (!k) return;
+        counts[k] = counts[k] || {};
+        counts[k][n] = (counts[k][n] || 0) + 1;
+      });
+    });
+  });
+  function rank(v) {
+    v = cleanAuthorName(v);
+    if (/^[a-z]+(-[a-z]+)+$/.test(v)) return 9;            // "child-lee"
+    const oddCase = isAllCaps(v) || v === v.toLowerCase() ? 1 : 0;
+    return (v.indexOf(',') !== -1 ? 0 : /\S\s{2,}\S/.test(v) ? 2 : 4) + oddCase;
+  }
+  authorName = {};
+  Object.keys(counts).forEach(function (k) {
+    const best = Object.keys(counts[k]).sort(function (a, b) {
+      return rank(a) - rank(b) || counts[k][b] - counts[k][a];
+    })[0];
+    let b = cleanAuthorName(best);
+    if (/^[a-z]+(-[a-z]+)+$/.test(b)) b = b.replace(/-/g, ' ');
+    // Fix capitals word by word: "ALLENDE, Isabel" -> "Allende, Isabel",
+    // "clark, mary higgins" -> "Clark, Mary Higgins".
+    authorName[k] = surnameFirst(b).split(', ').map(function (part) {
+      return (isAllCaps(part) || part === part.toLowerCase()) ? tidyCaps(part.toUpperCase()) : part;
+    }).join(', ');
+  });
+  items.forEach(function (item) { item._authors = authorsOf(item); });
+}
+
+function showAuthor(key) { return authorName[key] || key; }
+
+// ---- Tags (shown on results) ----------------------------------------
+// "Thriller", "thriller" and "Thriller." are shown as one tag.
+let tagName = {};
+function tagKey(g) { return g.toLowerCase().replace(/\.+$/, '').replace(/\s+/g, ' ').trim(); }
+function tagsOf(item) {
+  const keys = [];
+  COLUMNS.tags.forEach(function (c) {
+    splitMulti(cell(item, c)).forEach(function (g) {
+      const k = tagKey(g);
+      if (k && keys.indexOf(k) === -1) keys.push(k);
+    });
+  });
+  return keys;
+}
+function buildTagNames(items) {
+  const counts = {};
+  items.forEach(function (item) {
+    COLUMNS.tags.forEach(function (c) {
+      splitMulti(cell(item, c)).forEach(function (g) {
+        g = g.replace(/\.+$/, '').replace(/\s+/g, ' ').trim();
+        const k = tagKey(g);
+        if (!k) return;
+        counts[k] = counts[k] || {};
+        counts[k][g] = (counts[k][g] || 0) + 1;
+      });
+    });
+  });
+  tagName = {};
+  Object.keys(counts).forEach(function (k) {
+    const best = Object.keys(counts[k]).sort(function (a, b) {
+      const ua = /^[A-Z]/.test(a) && !isAllCaps(a) ? 0 : 1, ub = /^[A-Z]/.test(b) && !isAllCaps(b) ? 0 : 1;
+      return ua - ub || counts[k][b] - counts[k][a];
+    })[0];
+    tagName[k] = isAllCaps(best) ? tidyCaps(best) : best.charAt(0).toUpperCase() + best.slice(1);
+  });
+  items.forEach(function (item) { item._tags = tagsOf(item); });
+}
+function showTag(key) { return tagName[key] || key; }
+
+function sectionOf(item) { return cell(item, COLUMNS.section).replace(/\s+/g, ' '); }
 
 // Normalise year: Sheets may hand back 2023 as "2023.0" or "2023.00".
 function yearOf(item) {
@@ -188,10 +352,10 @@ async function init() {
       .filter(function (o) {
         // Skip blank rows and books marked inactive (withdrawn/lost).
         return cell(o, COLUMNS.title) && cell(o, 'Is Active').toLowerCase() !== 'no';
-      })
-      .sort(function (a, b) {
-        return sortKey(cell(a, COLUMNS.title)).localeCompare(sortKey(cell(b, COLUMNS.title)));
       });
+    buildAuthorNames(allItems);
+    buildTagNames(allItems);
+    allItems.sort(compareBooks);
     render();
   } catch (err) {
     showError('Could not load the book catalogue — check your connection and reload.');
@@ -199,7 +363,7 @@ async function init() {
 
   ['input', 'change'].forEach(function (evt) {
     $('titleSearch').addEventListener(evt, render);
-    $('genreFilter').addEventListener(evt, render);
+    $('sectionFilter').addEventListener(evt, render);
     $('yearFilter').addEventListener(evt, render);
     $('authorFilter').addEventListener(evt, render);
   });
@@ -210,6 +374,15 @@ function sortKey(title) {
   return title.toLowerCase().replace(/^(the|a|an)\s+/, '');
 }
 
+// Results order: by first author (as shown), then by title. Books with no
+// author go to the end.
+function compareBooks(a, b) {
+  const aa = a._authors.length ? showAuthor(a._authors[0]) : '\uffff';
+  const ba = b._authors.length ? showAuthor(b._authors[0]) : '\uffff';
+  return byText(aa, ba) ||
+         byText(sortKey(cell(a, COLUMNS.title)), sortKey(cell(b, COLUMNS.title)));
+}
+
 function showError(msg) {
   $('errorBox').textContent = msg;
   $('errorBox').classList.remove('hidden');
@@ -217,18 +390,18 @@ function showError(msg) {
 }
 
 // Does this item satisfy filter set f? Any field left as '' in f is not
-// constrained. f: { text, genre, year, author }
+// constrained. f: { text, section, year, author }
 function itemMatches(item, f) {
   if (f.text && cell(item, COLUMNS.title).toLowerCase().indexOf(f.text) === -1) return false;
-  if (f.genre && multiValues(item, COLUMNS.genre).indexOf(f.genre) === -1) return false;
+  if (f.section && sectionOf(item) !== f.section) return false;
   if (f.year && yearOf(item) !== f.year) return false;
-  if (f.author && multiValues(item, COLUMNS.author).indexOf(f.author) === -1) return false;
+  if (f.author && item._authors.indexOf(f.author) === -1) return false;
   return true;
 }
 
 // The values available for one dropdown, given the CURRENT state of every
 // OTHER filter (not this one's own selection) — this is what makes the
-// filters progressive: picking a genre narrows the author/year dropdowns,
+// filters progressive: picking a section narrows the author/year dropdowns,
 // and vice versa.
 function optionsFor(field, raw) {
   const relaxed = Object.assign({}, raw);
@@ -236,14 +409,14 @@ function optionsFor(field, raw) {
   const subset = allItems.filter(function (item) { return itemMatches(item, relaxed); });
   const values = new Set();
   subset.forEach(function (item) {
-    if (field === 'genre') multiValues(item, COLUMNS.genre).forEach(function (v) { values.add(v); });
-    else if (field === 'author') multiValues(item, COLUMNS.author).forEach(function (v) { values.add(v); });
+    if (field === 'section') { const sec = sectionOf(item); if (sec) values.add(sec); }
+    else if (field === 'author') item._authors.forEach(function (v) { values.add(v); });
     else if (field === 'year') { const y = yearOf(item); if (y) values.add(y); }
   });
   return Array.from(values);
 }
 
-function rebuildSelect(id, anyLabel, values, selectedValue) {
+function rebuildSelect(id, anyLabel, values, selectedValue, labelOf) {
   const sel = $(id);
   sel.innerHTML = '';
   const anyOpt = document.createElement('option');
@@ -253,7 +426,7 @@ function rebuildSelect(id, anyLabel, values, selectedValue) {
   values.forEach(function (v) {
     const opt = document.createElement('option');
     opt.value = v;
-    opt.textContent = v;
+    opt.textContent = labelOf ? labelOf(v) : v;
     sel.appendChild(opt);
   });
   sel.value = selectedValue;
@@ -261,7 +434,7 @@ function rebuildSelect(id, anyLabel, values, selectedValue) {
 
 function clearFilters() {
   $('titleSearch').value = '';
-  $('genreFilter').value = '';
+  $('sectionFilter').value = '';
   $('yearFilter').value = '';
   $('authorFilter').value = '';
   render();
@@ -272,26 +445,26 @@ function byText(a, b) { return a.localeCompare(b, undefined, { sensitivity: 'bas
 function render() {
   const raw = {
     text: $('titleSearch').value.trim().toLowerCase(),
-    genre: $('genreFilter').value,
+    section: $('sectionFilter').value,
     year: $('yearFilter').value,
     author: $('authorFilter').value
   };
 
-  const genreOptions = optionsFor('genre', raw).sort(byText);
+  const sectionOptions = optionsFor('section', raw).sort(byText);
   const yearOptions = optionsFor('year', raw).sort().reverse();
-  const authorOptions = optionsFor('author', raw).sort(byText);
+  const authorOptions = optionsFor('author', raw).sort(function (a, b) { return byText(showAuthor(a), showAuthor(b)); });
 
   // Drop a selection back to "Any" if the other filters have made it impossible.
   const kept = {
     text: raw.text,
-    genre: genreOptions.indexOf(raw.genre) !== -1 ? raw.genre : '',
+    section: sectionOptions.indexOf(raw.section) !== -1 ? raw.section : '',
     year: yearOptions.indexOf(raw.year) !== -1 ? raw.year : '',
     author: authorOptions.indexOf(raw.author) !== -1 ? raw.author : ''
   };
 
-  rebuildSelect('genreFilter', 'Any genre', genreOptions, kept.genre);
+  rebuildSelect('sectionFilter', 'Any section', sectionOptions, kept.section);
   rebuildSelect('yearFilter', 'Any year', yearOptions, kept.year);
-  rebuildSelect('authorFilter', 'Any author', authorOptions, kept.author);
+  rebuildSelect('authorFilter', 'Any author', authorOptions, kept.author, showAuthor);
 
   const matches = allItems.filter(function (item) { return itemMatches(item, kept); });
 
@@ -330,9 +503,10 @@ function renderItem(item) {
   div.appendChild(h3);
 
   const lines = [
-    ['Author', multiValues(item, COLUMNS.author).join('; ')],
-    ['Genre', multiValues(item, COLUMNS.genre).join('; ')],
-    ['Year', yearOf(item)]
+    ['Author', item._authors.map(showAuthor).join('; ')],
+    ['Section', sectionOf(item)],
+    ['Year', yearOf(item)],
+    ['Tags', item._tags.map(showTag).join(', ')]
   ];
   lines.forEach(function (pair) {
     if (!pair[1]) return;
