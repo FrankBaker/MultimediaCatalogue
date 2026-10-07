@@ -53,12 +53,22 @@
   .queried { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .table-wrap { overflow-x: auto; }
   .row-status { font-size: 12px; white-space: nowrap; }
+  .mode-switch { display: flex; gap: 8px; margin-bottom: 6px; }
+  .mode-switch label {
+    flex: 1; margin: 0; padding: 10px; text-align: center; font-size: 15px; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: #fff;
+  }
+  .mode-switch input { display: none; }
+  .mode-switch input:checked + span { font-weight: 600; }
+  .mode-switch label:has(input:checked) { border-color: var(--accent); background: var(--ok-bg); }
+  .hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+  td input.season { min-width: 70px; width: 80px; }
 </style>
 </head>
 <body>
 
 <h1>DVD Batch Lookup</h1>
-<p class="subtitle">Paste a list of DVD titles, look them all up at once, check the results, then save the ones you want into the sheet — formatted for a straight CSV import into Librarika.</p>
+<p class="subtitle">Paste a list of DVD titles (films or TV series), look them all up at once, check the results, then save the ones you want into the sheet — formatted for a straight CSV import into Librarika.</p>
 
 <!-- ============ PIN entry ============ -->
 <div id="pinCard" class="card hidden">
@@ -71,8 +81,15 @@
 
 <!-- ============ Input ============ -->
 <div id="inputCard" class="card hidden">
-  <label for="titlesInput">DVD titles — one per line</label>
+  <label>What's in this batch?</label>
+  <div class="mode-switch">
+    <label><input type="radio" name="mode" value="movie" checked onchange="setMode('movie')"><span>🎬 Films</span></label>
+    <label><input type="radio" name="mode" value="tv" onchange="setMode('tv')"><span>📺 TV series</span></label>
+  </div>
+
+  <label for="titlesInput" id="titlesLabel">DVD titles — one per line</label>
   <textarea id="titlesInput" placeholder="Jaws&#10;The Matrix&#10;Amelie"></textarea>
+  <p class="hint hidden" id="tvHint">Type just the show's name — leave out words like "Season", "Series" or "Box Set". If the case holds one season (or a few), add <b>|</b> and the season number after the name. Leave the season off for a complete-series box.</p>
 
   <label for="defaultLocation">Default location for this batch (optional — applied to every row, editable per item)</label>
   <input type="text" id="defaultLocation" placeholder="e.g. Shelf 3, Box B">
@@ -96,11 +113,12 @@
         <tr>
           <th>Save?</th>
           <th>Title</th>
-          <th>Director</th>
+          <th class="tv-only">Season</th>
+          <th id="thDirector">Director</th>
           <th>Cast</th>
           <th>Genre</th>
           <th>Year</th>
-          <th>Studio</th>
+          <th id="thStudio">Studio</th>
           <th>Location</th>
           <th>Status</th>
         </tr>
@@ -118,10 +136,39 @@
 // Fill in the Web App URL for THIS DVD tool's Apps Script deployment
 // (a separate deployment from the main scan.html one — see SETUP-DVD.md).
 // ---------------------------------------------------------------------
-const BACKEND_URL = 'PASTE_YOUR_DVD_BACKEND_URL_HERE';
+const BACKEND_URL = 'https://script.google.com/macros/s/AKfycby6IL5f66gSGJaic73XKADLelOdI_YxRWNIndxOy8HJnBgPZL4z6KK1aZlBnWXb8ifshA/exec';
 
 let pin = null;
 let rows = []; // working set of looked-up/edited rows
+let mode = 'movie';      // what the input switch is set to: 'movie' | 'tv'
+let batchMode = 'movie'; // what the current results table was looked up as
+
+const PLACEHOLDERS = {
+  movie: 'Jaws\nThe Matrix\nAmelie',
+  tv: 'Downton Abbey | 3\nThe Crown | 1-2\nFawlty Towers'
+};
+
+function setMode(m) {
+  mode = m;
+  $('titlesInput').placeholder = PLACEHOLDERS[m];
+  $('titlesLabel').textContent = m === 'tv'
+    ? 'TV series — one case per line: Show name | season'
+    : 'DVD titles — one per line';
+  if (m === 'tv') show('tvHint'); else hide('tvHint');
+  try { localStorage.setItem('dvd_batch_mode', m); } catch (e) {}
+}
+
+// "3" -> "Season 3", "1-3" -> "Seasons 1–3", "complete" -> "Complete series",
+// blank -> "" (complete-series box), anything else kept as typed.
+function seasonLabel(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^\d+$/.test(s)) return 'Season ' + Number(s);
+  const range = s.match(/^(\d+)\s*(?:-|–|to)\s*(\d+)$/i);
+  if (range) return 'Seasons ' + Number(range[1]) + '–' + Number(range[2]);
+  if (/^complete/i.test(s)) return 'Complete series';
+  return s;
+}
 
 function $(id) { return document.getElementById(id); }
 function show(id) { $(id).classList.remove('hidden'); }
@@ -133,6 +180,12 @@ function hideAllCards() {
 // ---- PIN handling -----------------------------------------------------
 
 function init() {
+  let savedMode = null;
+  try { savedMode = localStorage.getItem('dvd_batch_mode'); } catch (e) {}
+  if (savedMode === 'tv') {
+    document.querySelector('input[name=mode][value=tv]').checked = true;
+    setMode('tv');
+  }
   pin = localStorage.getItem('dvd_batch_pin');
   if (pin) {
     hideAllCards();
@@ -182,7 +235,7 @@ async function lookupAll() {
 
   let data;
   try {
-    data = await apiGet({ action: 'lookupBatch', titles: titles, pin: pin });
+    data = await apiGet({ action: 'lookupBatch', titles: titles, mode: mode, pin: pin });
   } catch (err) {
     hideAllCards();
     show('inputCard');
@@ -207,12 +260,14 @@ async function lookupAll() {
   }
 
   const defaultLocation = $('defaultLocation').value.trim();
+  batchMode = mode;
   rows = data.results.map(function (r) {
     const matched = !r.error;
     return {
       queryTitle: r.queryTitle,
       matchedTitle: r.matchedTitle || '',
-      title: matched ? (r.matchedTitle || r.queryTitle) : r.queryTitle,
+      title: matched ? (r.matchedTitle || r.queryTitle) : r.queryTitle, // show name in TV mode
+      season: r.season || '',
       director: r.director || '',
       cast: r.cast || '',
       genre: r.genre || '',
@@ -220,7 +275,7 @@ async function lookupAll() {
       studio: r.studio || '',
       location: defaultLocation,
       overview: r.overview || '',
-      tmdbUrl: r.tmdbId ? ('https://www.themoviedb.org/movie/' + r.tmdbId) : '',
+      tmdbUrl: r.tmdbUrl || (r.tmdbId ? ('https://www.themoviedb.org/movie/' + r.tmdbId) : ''),
       remarks: matched ? 'Looked up via TMDB (auto)' : 'No TMDB match — check by hand before saving',
       error: r.error || null,
       included: matched, // rows with no match start unchecked — nothing to review yet
@@ -234,6 +289,12 @@ async function lookupAll() {
 function renderResults() {
   hideAllCards();
   show('resultsCard');
+  const tv = batchMode === 'tv';
+  $('thDirector').textContent = tv ? 'Creator' : 'Director';
+  $('thStudio').textContent = tv ? 'Network' : 'Studio';
+  document.querySelectorAll('th.tv-only').forEach(function (th) {
+    th.classList.toggle('hidden', !tv);
+  });
   const matchedCount = rows.filter(function (r) { return !r.error; }).length;
   $('resultsSummary').textContent = matchedCount + ' of ' + rows.length + ' titles matched on TMDB. ' +
     'Check the details below (especially any row highlighted as unmatched) before saving.';
@@ -247,6 +308,7 @@ function renderResults() {
 
     tr.appendChild(cellCheckbox(i));
     tr.appendChild(cellTitle(i));
+    if (tv) tr.appendChild(cellInput(i, 'season', 'season'));
     tr.appendChild(cellInput(i, 'director'));
     tr.appendChild(cellInput(i, 'cast'));
     tr.appendChild(cellInput(i, 'genre'));
@@ -291,10 +353,11 @@ function cellTitle(i) {
   return td;
 }
 
-function cellInput(i, field) {
+function cellInput(i, field, cls) {
   const td = document.createElement('td');
   const input = document.createElement('input');
   input.type = 'text';
+  if (cls) input.className = cls;
   input.value = rows[i][field];
   input.oninput = function () { rows[i][field] = input.value; };
   td.appendChild(input);
@@ -331,12 +394,22 @@ async function saveChecked() {
     const r = item.row;
     r.status = 'saving';
     renderResults();
+    // TV series: Title = "Show – Season 3" (or just "Show" for a complete
+    // box), Series = show name, Volume = season label, Tags = "TV series".
+    let title = r.title, series = '', volume = '', tags = '';
+    if (batchMode === 'tv') {
+      series = r.title.trim();
+      volume = seasonLabel(r.season);
+      title = volume ? series + ' – ' + volume : series;
+      tags = 'TV series';
+    }
     try {
       const data = await apiGet({
         action: 'add', pin: pin,
-        title: r.title, director: r.director, cast: r.cast, genre: r.genre,
+        title: title, director: r.director, cast: r.cast, genre: r.genre,
         year: r.year, studio: r.studio, location: r.location,
-        overview: r.overview, tmdbUrl: r.tmdbUrl, remarks: r.remarks
+        overview: r.overview, tmdbUrl: r.tmdbUrl, remarks: r.remarks,
+        series: series, volume: volume, tags: tags
       });
       if (data.error === 'bad_pin') {
         alert('That PIN was rejected by the backend. Use "Change PIN" to re-enter it.');
