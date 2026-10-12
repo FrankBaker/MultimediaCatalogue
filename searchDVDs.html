@@ -52,6 +52,7 @@
   }
   .item h3 { margin: 0 0 6px; font-size: 15px; }
   .item .meta { font-size: 13px; color: var(--muted); margin: 2px 0; }
+  .item .desc { font-size: 13px; line-height: 1.45; margin: 8px 0 0; }
   .item .location { font-size: 13px; color: var(--accent-dark); font-weight: 600; margin-top: 8px; }
   .empty { color: var(--muted); font-size: 14px; padding: 20px 0; text-align: center; }
 </style>
@@ -75,12 +76,8 @@
       <select id="yearFilter"><option value="">Any year</option></select>
     </div>
     <div>
-      <label for="directorFilter">Director</label>
-      <select id="directorFilter"><option value="">Any director</option></select>
-    </div>
-    <div>
-      <label for="actorFilter">Actor</label>
-      <select id="actorFilter"><option value="">Any actor</option></select>
+      <label for="directorFilter">Director or actor</label>
+      <select id="directorFilter"><option value="">Anyone</option></select>
     </div>
   </div>
 
@@ -176,7 +173,6 @@ async function init() {
     $('genreFilter').addEventListener(evt, render);
     $('yearFilter').addEventListener(evt, render);
     $('directorFilter').addEventListener(evt, render);
-    $('actorFilter').addEventListener(evt, render);
   });
 }
 
@@ -187,13 +183,14 @@ function showError(msg) {
 }
 
 // Does this item satisfy filter set f? Any field left as '' in f is not
-// constrained. f: { text, genre, year, director, actor }
+// constrained. f: { text, genre, year, director }
+// Librarika's export puts director AND cast together in Authors (Co-authors
+// comes out empty), so one "Director or actor" filter covers both.
 function itemMatches(item, f) {
   if (f.text && !String(item['Title'] || '').toLowerCase().includes(f.text)) return false;
   if (f.genre && splitMulti(item['Subject']).indexOf(f.genre) === -1) return false;
   if (f.year && String(item['Year']) !== f.year) return false;
   if (f.director && splitMulti(item['Authors']).indexOf(f.director) === -1) return false;
-  if (f.actor && splitMulti(item['Co-authors']).indexOf(f.actor) === -1) return false;
   return true;
 }
 
@@ -209,7 +206,6 @@ function optionsFor(field, raw) {
   subset.forEach(function (item) {
     if (field === 'genre') splitMulti(item['Subject']).forEach(function (v) { values.add(v); });
     else if (field === 'director') splitMulti(item['Authors']).forEach(function (v) { values.add(v); });
-    else if (field === 'actor') splitMulti(item['Co-authors']).forEach(function (v) { values.add(v); });
     else if (field === 'year') { if (item['Year']) values.add(String(item['Year'])); }
   });
   return Array.from(values);
@@ -236,7 +232,6 @@ function clearFilters() {
   $('genreFilter').value = '';
   $('yearFilter').value = '';
   $('directorFilter').value = '';
-  $('actorFilter').value = '';
   render();
 }
 
@@ -245,15 +240,13 @@ function render() {
     text: $('titleSearch').value.trim().toLowerCase(),
     genre: $('genreFilter').value,
     year: $('yearFilter').value,
-    director: $('directorFilter').value,
-    actor: $('actorFilter').value
+    director: $('directorFilter').value
   };
 
   // Recompute each dropdown's own option list from the other active filters.
   const genreOptions = optionsFor('genre', raw).sort();
   const yearOptions = optionsFor('year', raw).sort().reverse();
   const directorOptions = optionsFor('director', raw).sort();
-  const actorOptions = optionsFor('actor', raw).sort();
 
   // If a selection is no longer possible given the other filters (e.g. a
   // previously-picked director has no titles left once a genre is chosen),
@@ -262,14 +255,12 @@ function render() {
     text: raw.text,
     genre: genreOptions.indexOf(raw.genre) !== -1 ? raw.genre : '',
     year: yearOptions.indexOf(raw.year) !== -1 ? raw.year : '',
-    director: directorOptions.indexOf(raw.director) !== -1 ? raw.director : '',
-    actor: actorOptions.indexOf(raw.actor) !== -1 ? raw.actor : ''
+    director: directorOptions.indexOf(raw.director) !== -1 ? raw.director : ''
   };
 
   rebuildSelect('genreFilter', 'Any genre', genreOptions, kept.genre);
   rebuildSelect('yearFilter', 'Any year', yearOptions, kept.year);
-  rebuildSelect('directorFilter', 'Any director', directorOptions, kept.director);
-  rebuildSelect('actorFilter', 'Any actor', actorOptions, kept.actor);
+  rebuildSelect('directorFilter', 'Anyone', directorOptions, kept.director);
 
   const matches = allItems.filter(function (item) { return itemMatches(item, kept); });
 
@@ -301,8 +292,7 @@ function renderItem(item) {
   div.appendChild(h3);
 
   const lines = [
-    ['Director', item['Authors']],
-    ['Cast', item['Co-authors']],
+    ['Director & cast', item['Authors']],
     ['Genre', item['Subject']],
     ['Year', item['Year']],
     ['Studio', item['Publisher']]
@@ -314,6 +304,13 @@ function renderItem(item) {
     p.textContent = pair[0] + ': ' + pair[1];
     div.appendChild(p);
   });
+
+  if (item['Description']) {
+    const d = document.createElement('div');
+    d.className = 'desc';
+    d.textContent = item['Description'];
+    div.appendChild(d);
+  }
 
   if (item['Location']) {
     const loc = document.createElement('div');
