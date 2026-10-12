@@ -68,6 +68,10 @@
 
   <div class="filter-grid">
     <div>
+      <label for="kindFilter">Film or series</label>
+      <select id="kindFilter"><option value="">All DVDs</option></select>
+    </div>
+    <div>
       <label for="genreFilter">Genre</label>
       <select id="genreFilter"><option value="">Any genre</option></select>
     </div>
@@ -170,6 +174,7 @@ async function init() {
 
   ['input', 'change'].forEach(function (evt) {
     $('titleSearch').addEventListener(evt, render);
+    $('kindFilter').addEventListener(evt, render);
     $('genreFilter').addEventListener(evt, render);
     $('yearFilter').addEventListener(evt, render);
     $('directorFilter').addEventListener(evt, render);
@@ -183,11 +188,14 @@ function showError(msg) {
 }
 
 // Does this item satisfy filter set f? Any field left as '' in f is not
-// constrained. f: { text, genre, year, director }
+// constrained. f: { text, kind, genre, year, director }
+// kind comes from the Location column (Film DVDs, Series DVDs, and any
+// new shelf such as Documentary DVDs appears automatically).
 // Librarika's export puts director AND cast together in Authors (Co-authors
 // comes out empty), so one "Director or actor" filter covers both.
 function itemMatches(item, f) {
   if (f.text && !String(item['Title'] || '').toLowerCase().includes(f.text)) return false;
+  if (f.kind && item['Location'] !== f.kind) return false;
   if (f.genre && splitMulti(item['Subject']).indexOf(f.genre) === -1) return false;
   if (f.year && String(item['Year']) !== f.year) return false;
   if (f.director && splitMulti(item['Authors']).indexOf(f.director) === -1) return false;
@@ -204,7 +212,8 @@ function optionsFor(field, raw) {
   const subset = allItems.filter(function (item) { return itemMatches(item, relaxed); });
   const values = new Set();
   subset.forEach(function (item) {
-    if (field === 'genre') splitMulti(item['Subject']).forEach(function (v) { values.add(v); });
+    if (field === 'kind') { if (item['Location']) values.add(item['Location']); }
+    else if (field === 'genre') splitMulti(item['Subject']).forEach(function (v) { values.add(v); });
     else if (field === 'director') splitMulti(item['Authors']).forEach(function (v) { values.add(v); });
     else if (field === 'year') { if (item['Year']) values.add(String(item['Year'])); }
   });
@@ -229,6 +238,7 @@ function rebuildSelect(id, anyLabel, values, selectedValue) {
 
 function clearFilters() {
   $('titleSearch').value = '';
+  $('kindFilter').value = '';
   $('genreFilter').value = '';
   $('yearFilter').value = '';
   $('directorFilter').value = '';
@@ -238,12 +248,14 @@ function clearFilters() {
 function render() {
   const raw = {
     text: $('titleSearch').value.trim().toLowerCase(),
+    kind: $('kindFilter').value,
     genre: $('genreFilter').value,
     year: $('yearFilter').value,
     director: $('directorFilter').value
   };
 
   // Recompute each dropdown's own option list from the other active filters.
+  const kindOptions = optionsFor('kind', raw).sort();
   const genreOptions = optionsFor('genre', raw).sort();
   const yearOptions = optionsFor('year', raw).sort().reverse();
   const directorOptions = optionsFor('director', raw).sort();
@@ -253,11 +265,13 @@ function render() {
   // drop it back to "Any" rather than silently filtering to zero results.
   const kept = {
     text: raw.text,
+    kind: kindOptions.indexOf(raw.kind) !== -1 ? raw.kind : '',
     genre: genreOptions.indexOf(raw.genre) !== -1 ? raw.genre : '',
     year: yearOptions.indexOf(raw.year) !== -1 ? raw.year : '',
     director: directorOptions.indexOf(raw.director) !== -1 ? raw.director : ''
   };
 
+  rebuildSelect('kindFilter', 'All DVDs', kindOptions, kept.kind);
   rebuildSelect('genreFilter', 'Any genre', genreOptions, kept.genre);
   rebuildSelect('yearFilter', 'Any year', yearOptions, kept.year);
   rebuildSelect('directorFilter', 'Anyone', directorOptions, kept.director);
