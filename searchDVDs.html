@@ -59,7 +59,7 @@
 <body>
 
 <h1>DVD Search</h1>
-<p class="subtitle">Search the DVDs catalogued so far. This reads the working staging sheet directly — no login needed.</p>
+<p class="subtitle">Search the library's DVDs — no login needed.</p>
 
 <div class="card">
   <label for="titleSearch">Title contains</label>
@@ -93,11 +93,15 @@
 
 <script>
 // ---------------------------------------------------------------------
-// Same DVD-batch backend as scanDVDs.html — fill in with the same Web
-// App URL from SETUP-DVD.md step 5. This page only ever calls the
-// read-only "list" action, which needs no PIN.
+// SETUP: reads the MultiMedia-catalog-copies Google Sheet (the DVD/CD
+// export from Librarika). The sheet must be shared as
+// "Anyone with the link — Viewer".
+// SHEET_ID is the long string in the sheet's address between /d/ and
+// /edit; SHEET_GID is the number after gid= for the DVD tab.
+// To refresh: export from Librarika again and paste over the sheet.
 // ---------------------------------------------------------------------
-const BACKEND_URL = 'https://script.google.com/macros/s/AKfycby6IL5f66gSGJaic73XKADLelOdI_YxRWNIndxOy8HJnBgPZL4z6KK1aZlBnWXb8ifshA/exec';
+const SHEET_ID = '1Di95p_ciBBe-hYnhUuxpaXuQAaVSy97Yi-tXOkpVUqk';
+const SHEET_GID = '1816433671';
 
 let allItems = [];
 
@@ -110,18 +114,61 @@ function splitMulti(value) {
     .filter(function (s) { return s.length > 0; });
 }
 
+// Minimal but complete CSV parser (handles quotes, commas and line
+// breaks inside descriptions).
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (c !== '\r') field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
 async function init() {
   try {
-    const resp = await fetch(BACKEND_URL + '?action=list');
-    const data = await resp.json();
-    if (!data.ok) {
-      showError('Could not load the catalogue: ' + (data.error || 'unknown error'));
+    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID +
+                '/gviz/tq?tqx=out:csv&headers=1&gid=' + SHEET_GID;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const text = await resp.text();
+    if (text.trim().charAt(0) === '<') {
+      showError('The sheet is not shared publicly. In Google Sheets choose Share → General access → "Anyone with the link" → Viewer.');
       return;
     }
-    allItems = data.items || [];
+    const rows = parseCSV(text);
+    const headers = (rows.shift() || []).map(function (h) { return h.trim(); });
+    allItems = rows
+      .map(function (r) {
+        const o = {};
+        headers.forEach(function (h, i) { o[h] = String(r[i] || '').trim(); });
+        // Sheets may hand back 2023 as "2023.0".
+        o['Year'] = o['Year'] ? o['Year'].replace(/\.0+$/, '') : '';
+        return o;
+      })
+      .filter(function (o) {
+        // Skip blank rows, items marked inactive (withdrawn/lost), and
+        // anything whose Category isn't DVD (the same sheet holds the CDs).
+        return o['Title'] && String(o['Is Active'] || '').toLowerCase() !== 'no' &&
+          (!headers.includes('Category') || /dvd/i.test(o['Category']));
+      })
+      .sort(function (a, b) {
+        const key = function (t) { return t.toLowerCase().replace(/^(the|a|an) /, ''); };
+        return key(a['Title']).localeCompare(key(b['Title']));
+      });
     render();
   } catch (err) {
-    showError('Could not reach the catalogue backend — check your connection and reload.');
+    showError('Could not load the DVD catalogue — check your connection and reload.');
   }
 
   ['input', 'change'].forEach(function (evt) {
