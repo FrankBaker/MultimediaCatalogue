@@ -99,22 +99,28 @@
 
 <!-- ============ Camera + manual entry ============ -->
 <div id="scanCard" class="card hidden">
-  <button class="primary" onclick="triggerPhotoScan()">📷 Scan barcode</button>
-  <p class="status">Take a photo — doesn't need to be perfectly framed, you'll trim it down to just the barcode on the next screen.</p>
+  <div id="liveSection">
+    <div id="reader"></div>
+    <div id="zoomBar" class="hidden"></div>
+    <p class="status" id="liveScannerHint">Hold the phone back far enough that the picture is sharp (about 20–25&nbsp;cm), then use the zoom buttons until the barcode fills most of the box.</p>
+    <p class="warn hidden" id="noZoomNote">This browser doesn't let the page zoom the camera. Tap <strong>Try taking a photo instead</strong> below, and use the zoom button in the camera app.</p>
+    <p class="error hidden" id="liveError"></p>
+  </div>
+
+  <div id="photoSection" class="hidden">
+    <button class="primary" onclick="triggerPhotoScan()">📷 Take a photo of the barcode</button>
+    <p class="status">Doesn't need to be perfectly framed — you'll trim it down to just the barcode on the next screen.</p>
+  </div>
   <input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden">
   <div id="photoReader" class="hidden"></div>
+
+  <button class="link" id="modeToggle" onclick="switchScanMode()">Try taking a photo instead</button>
 
   <label for="manualBarcode">Or type the barcode number</label>
   <div class="row">
     <input type="text" id="manualBarcode" inputmode="numeric" placeholder="e.g. 602475027799">
     <button class="secondary" style="max-width:120px" onclick="lookupManual()">Look up</button>
   </div>
-
-  <button class="link" id="liveScannerToggle" onclick="toggleLiveScanner()">Try live camera scanning instead</button>
-  <div id="reader" class="hidden"></div>
-  <div id="zoomBar" class="hidden"></div>
-  <p class="status hidden" id="liveScannerHint">Hold the phone back far enough that the picture is sharp (about 20–25&nbsp;cm), then use the zoom buttons until the barcode fills most of the box.</p>
-  <p class="warn hidden" id="noZoomNote">This browser doesn't let the page zoom the camera. Use <strong>📷 Scan barcode</strong> instead and tap <strong>2×</strong> in the camera app before taking the photo.</p>
 
   <button class="link" onclick="changePin()">Change PIN</button>
 </div>
@@ -202,7 +208,7 @@
   <button class="primary" onclick="scanNext()">Scan next item</button>
 </div>
 
-<p class="status" style="text-align:center;font-size:12px">Page version 2026-11-09b (zoom)</p>
+<p class="status" style="text-align:center;font-size:12px">Page version 2026-11-09c (live first)</p>
 
 <script>
 // ---------------------------------------------------------------------
@@ -277,8 +283,8 @@ const BARCODE_FORMATS = [
   Html5QrcodeSupportedFormats.CODE_39
 ];
 
-// Photo capture (see scanCard markup) is the default/primary way to scan.
-// Live scanning is opt-in. Its problem on iPhone: the lens can't focus close
+// Live scanning (with zoom) is the default method since 2026-11-09; photo
+// capture + crop is the fallback. Its problem on iPhone: the lens can't focus close
 // enough to make the barcode fill the scan box. Fix (2026-11-09): hold the
 // phone further back, where it IS sharp, and zoom the camera in instead.
 // Zoom uses the standard getUserMedia "zoom" constraint (iOS Safari 17.4+,
@@ -289,36 +295,53 @@ const BARCODE_FORMATS = [
 // ready-made UI) so the page can talk to the running camera track.
 
 const ZOOM_LEVELS = [1, 2, 3, 4];
-const ZOOM_DEFAULT = 2;
+const ZOOM_DEFAULT = 3; // what worked on Frank's iPhone (2026-11-09)
+
+// Scan method: 'live' (default) or 'photo'. Remembered on this phone, so
+// "Scan next item" comes back to whichever method the volunteer last used.
+let scanMode = localStorage.getItem('mlb_scan_mode') === 'photo' ? 'photo' : 'live';
+let liveToken = null;              // identifies the most recent live start request
+let stopping = Promise.resolve();  // resolves once the previous camera has fully stopped
 
 function startScanning() {
-  stopScanning();
-  resetLiveUi();
   hideAllCards();
   show('scanCard');
+  applyScanMode();
 }
 
-function resetLiveUi() {
-  hide('reader');
-  hide('liveScannerHint');
+function switchScanMode() {
+  scanMode = scanMode === 'live' ? 'photo' : 'live';
+  localStorage.setItem('mlb_scan_mode', scanMode);
+  applyScanMode();
+}
+
+function applyScanMode() {
+  if (scanMode === 'live') {
+    hide('photoSection');
+    show('liveSection');
+    $('modeToggle').textContent = 'Try taking a photo instead';
+    startLive();
+  } else {
+    stopScanning();
+    hide('liveSection');
+    show('photoSection');
+    $('modeToggle').textContent = 'Use live camera scanning instead';
+  }
+}
+
+async function startLive() {
+  if (scanner || liveToken) return; // already running or starting
   hide('zoomBar');
   hide('noZoomNote');
-  $('liveScannerToggle').textContent = 'Try live camera scanning instead';
-}
-
-async function toggleLiveScanner() {
-  if (scanner) {
-    stopScanning();
-    resetLiveUi();
-    return;
-  }
-  show('reader');
-  show('liveScannerHint');
-  $('liveScannerToggle').textContent = 'Hide live camera scanning';
-  scanner = new Html5Qrcode('reader', { formatsToSupport: BARCODE_FORMATS });
-  const thisScanner = scanner;
+  hide('liveError');
+  const token = {};
+  liveToken = token;
+  await stopping; // never start a new camera while the old one is still shutting down
+  if (liveToken !== token || scanMode !== 'live') return;
+  const s = new Html5Qrcode('reader', { formatsToSupport: BARCODE_FORMATS });
+  scanner = s;
   try {
-    await scanner.start(
+    s._starting = s.start(
       { facingMode: 'environment' },
       {
         fps: 10,
@@ -340,15 +363,17 @@ async function toggleLiveScanner() {
       onScanSuccess,
       function () { /* ignore per-frame decode failures */ }
     );
+    await s._starting;
   } catch (err) {
-    if (scanner === thisScanner) {
+    if (scanner === s) {
       scanner = null;
-      resetLiveUi();
-      alert('Could not start the camera: ' + err);
+      liveToken = null;
+      $('liveError').textContent = "Couldn't start the camera (" + err + "). Check the browser is allowed to use the camera, or tap Try taking a photo instead.";
+      show('liveError');
     }
     return;
   }
-  if (scanner === thisScanner) setupZoom();
+  if (scanner === s) setupZoom();
 }
 
 function setupZoom() {
@@ -392,14 +417,19 @@ async function applyZoom(v) {
 }
 
 function stopScanning() {
+  liveToken = null;
+  hide('zoomBar');
   const s = scanner;
   scanner = null;
   if (!s) return;
-  try {
+  // Wait for a camera that's still starting to finish starting, then stop it,
+  // so two cameras never fight over the same viewfinder.
+  stopping = stopping.then(function () {
+    return Promise.resolve(s._starting).catch(function () {});
+  }).then(function () {
     const p = s.isScanning ? s.stop() : Promise.resolve();
-    p.then(function () { try { s.clear(); } catch (e) {} })
-     .catch(function () { try { s.clear(); } catch (e) {} });
-  } catch (e) { /* ignore */ }
+    return p.catch(function () {}).then(function () { try { s.clear(); } catch (e) {} });
+  });
 }
 
 function onScanSuccess(decodedText) {
