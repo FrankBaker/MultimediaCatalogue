@@ -78,6 +78,10 @@
   .hidden { display: none; }
   .barcode-display { font-family: monospace; font-size: 15px; color: var(--muted); }
   #reader { border-radius: 8px; overflow: hidden; }
+  #zoomBar { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+  #zoomBar span { font-size: 13px; color: var(--muted); }
+  #zoomBar button { margin: 0; padding: 8px 0; width: auto; flex: 1; background: #eee; color: var(--text); }
+  #zoomBar button.on { background: var(--accent); color: #fff; }
 </style>
 </head>
 <body>
@@ -108,7 +112,9 @@
 
   <button class="link" id="liveScannerToggle" onclick="toggleLiveScanner()">Try live camera scanning instead</button>
   <div id="reader" class="hidden"></div>
-  <p class="status hidden" id="liveScannerHint">Line the barcode up inside the box — it doesn't need to fill it, just be fully inside and in focus.</p>
+  <div id="zoomBar" class="hidden"></div>
+  <p class="status hidden" id="liveScannerHint">Hold the phone back far enough that the picture is sharp (about 20–25&nbsp;cm), then use the zoom buttons until the barcode fills most of the box.</p>
+  <p class="warn hidden" id="noZoomNote">This browser doesn't let the page zoom the camera. Use <strong>📷 Scan barcode</strong> instead and tap <strong>2×</strong> in the camera app before taking the photo.</p>
 
   <button class="link" onclick="changePin()">Change PIN</button>
 </div>
@@ -269,69 +275,133 @@ const BARCODE_FORMATS = [
   Html5QrcodeSupportedFormats.CODE_39
 ];
 
-// Photo capture (see scanCard markup) is the default/primary way to scan —
-// see the note by that button for why: the live preview below genuinely
-// can't focus as close as a phone's native camera app can on most phones,
-// which is a real hardware/browser limitation, not a tuning problem to
-// solve with box sizes. Live scanning stays available as an opt-in for
-// anyone who prefers it (it only needs to get inside the box, not fill it —
-// see liveScannerHint), started on demand rather than automatically so it's
-// not implicitly presented as the main path.
+// Photo capture (see scanCard markup) is the default/primary way to scan.
+// Live scanning is opt-in. Its problem on iPhone: the lens can't focus close
+// enough to make the barcode fill the scan box. Fix (2026-11-09): hold the
+// phone further back, where it IS sharp, and zoom the camera in instead.
+// Zoom uses the standard getUserMedia "zoom" constraint (iOS Safari 17.4+,
+// Chrome on Android). Where it isn't supported we say so and point to
+// photo mode, whose native camera app has its own 2x button.
+//
+// Uses the library's Html5Qrcode class directly (not Html5QrcodeScanner's
+// ready-made UI) so the page can talk to the running camera track.
+
+const ZOOM_LEVELS = [1, 2, 3, 4];
+const ZOOM_DEFAULT = 2;
 
 function startScanning() {
   stopScanning();
-  hide('reader');
-  hide('liveScannerHint');
-  $('liveScannerToggle').textContent = 'Try live camera scanning instead';
+  resetLiveUi();
   hideAllCards();
   show('scanCard');
 }
 
-function toggleLiveScanner() {
+function resetLiveUi() {
+  hide('reader');
+  hide('liveScannerHint');
+  hide('zoomBar');
+  hide('noZoomNote');
+  $('liveScannerToggle').textContent = 'Try live camera scanning instead';
+}
+
+async function toggleLiveScanner() {
   if (scanner) {
     stopScanning();
-    hide('reader');
-    hide('liveScannerHint');
-    $('liveScannerToggle').textContent = 'Try live camera scanning instead';
+    resetLiveUi();
     return;
   }
   show('reader');
   show('liveScannerHint');
   $('liveScannerToggle').textContent = 'Hide live camera scanning';
-  scanner = new Html5QrcodeScanner('reader', {
-    fps: 10,
-    // Sized to match what's actually achievable in focus on Frank's phone
-    // (measured directly: the barcode fills roughly a third of the frame at
-    // the closest distance that's still sharp) — this is honest framing
-    // guidance, not a decode requirement; it doesn't move the underlying
-    // decode-failure problem (see the note above this function).
-    qrbox: function (viewfinderWidth, viewfinderHeight) {
-      return {
-        width: Math.floor(viewfinderWidth * 0.35),
-        height: Math.floor(viewfinderHeight * 0.35)
-      };
-    },
-    formatsToSupport: BARCODE_FORMATS,
-    videoConstraints: {
-      facingMode: 'environment',
-      width: { ideal: 1920 },
-      height: { ideal: 1080 }
-    },
-    // Lets Chrome on Android use its faster native decoder when available;
-    // ignored harmlessly on browsers (e.g. iOS Safari) that don't support it.
-    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-  }, false);
-  scanner.render(onScanSuccess, function () { /* ignore per-frame decode failures */ });
+  scanner = new Html5Qrcode('reader', { formatsToSupport: BARCODE_FORMATS });
+  const thisScanner = scanner;
+  try {
+    await scanner.start(
+      { facingMode: 'environment' },
+      {
+        fps: 10,
+        // Barcode-shaped box (wide, short). Only this region is decoded,
+        // which is the live equivalent of the crop step in photo mode.
+        qrbox: function (w, h) {
+          return {
+            width: Math.max(50, Math.floor(w * 0.8)),
+            height: Math.max(50, Math.floor(h * 0.4))
+          };
+        },
+        videoConstraints: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+      },
+      onScanSuccess,
+      function () { /* ignore per-frame decode failures */ }
+    );
+  } catch (err) {
+    if (scanner === thisScanner) {
+      scanner = null;
+      resetLiveUi();
+      alert('Could not start the camera: ' + err);
+    }
+    return;
+  }
+  if (scanner === thisScanner) setupZoom();
+}
+
+function setupZoom() {
+  const bar = $('zoomBar');
+  bar.innerHTML = '';
+  let caps = {};
+  try { caps = scanner.getRunningTrackCapabilities() || {}; } catch (e) { caps = {}; }
+  const z = caps.zoom;
+  if (!z || typeof z.max !== 'number' || z.max <= (z.min || 1)) {
+    show('noZoomNote');
+    return;
+  }
+  const levels = ZOOM_LEVELS.filter(function (v) { return v >= z.min && v <= z.max; });
+  if (levels.length < 2) { show('noZoomNote'); return; }
+  const label = document.createElement('span');
+  label.textContent = 'Zoom';
+  bar.appendChild(label);
+  levels.forEach(function (v) {
+    const b = document.createElement('button');
+    b.textContent = v + '×';
+    b.dataset.zoom = v;
+    b.onclick = function () { applyZoom(v); };
+    bar.appendChild(b);
+  });
+  show('zoomBar');
+  const saved = parseFloat(localStorage.getItem('mlb_zoom'));
+  const start = levels.indexOf(saved) >= 0 ? saved
+              : (levels.indexOf(ZOOM_DEFAULT) >= 0 ? ZOOM_DEFAULT : levels[levels.length - 1]);
+  applyZoom(start);
+}
+
+async function applyZoom(v) {
+  if (!scanner) return;
+  try {
+    await scanner.applyVideoConstraints({ advanced: [{ zoom: v }] });
+    localStorage.setItem('mlb_zoom', String(v));
+    document.querySelectorAll('#zoomBar button').forEach(function (b) {
+      b.classList.toggle('on', parseFloat(b.dataset.zoom) === v);
+    });
+  } catch (e) { /* leave zoom as it was */ }
 }
 
 function stopScanning() {
-  if (scanner) {
-    try { scanner.clear(); } catch (e) { /* ignore */ }
-    scanner = null;
-  }
+  const s = scanner;
+  scanner = null;
+  if (!s) return;
+  try {
+    const p = s.isScanning ? s.stop() : Promise.resolve();
+    p.then(function () { try { s.clear(); } catch (e) {} })
+     .catch(function () { try { s.clear(); } catch (e) {} });
+  } catch (e) { /* ignore */ }
 }
 
 function onScanSuccess(decodedText) {
+  if (!scanner) return; // ignore extra hits while the camera is stopping
   stopScanning();
   handleBarcode(decodedText);
 }
