@@ -51,6 +51,9 @@
   tr.row-error { background: var(--warn-bg); }
   tr.row-saved { background: var(--ok-bg); }
   .queried { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  select.match-select { width: 100%; min-width: 210px; margin-top: 4px; font-size: 13px; padding: 4px;
+    border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+  tr.row-choose select.match-select { border-color: var(--warn); }
   .table-wrap { overflow-x: auto; }
   .row-status { font-size: 12px; white-space: nowrap; }
   .mode-switch { display: flex; gap: 8px; margin-bottom: 6px; }
@@ -263,6 +266,7 @@ async function lookupAll() {
   batchMode = mode;
   rows = data.results.map(function (r) {
     const matched = !r.error;
+    const needsChoice = !!r.needsChoice;
     return {
       queryTitle: r.queryTitle,
       matchedTitle: r.matchedTitle || '',
@@ -276,9 +280,14 @@ async function lookupAll() {
       location: defaultLocation,
       overview: r.overview || '',
       tmdbUrl: r.tmdbUrl || (r.tmdbId ? ('https://www.themoviedb.org/movie/' + r.tmdbId) : ''),
-      remarks: matched ? 'Looked up via TMDB (auto)' : 'No TMDB match — check by hand before saving',
+      remarks: !matched ? 'No TMDB match — check by hand before saving'
+        : (needsChoice ? 'Looked up via TMDB (picked from list)' : 'Looked up via TMDB (auto)'),
       error: r.error || null,
-      included: matched, // rows with no match start unchecked — nothing to review yet
+      candidates: r.candidates || [], // films only: other TMDB matches for the dropdown
+      selectedId: r.tmdbId || '',
+      needsChoice: needsChoice,       // several films share this exact title — user must pick
+      // Unmatched rows and rows still needing a pick start unchecked.
+      included: matched && !needsChoice,
       status: 'pending' // pending | saving | saved | duplicate | failed
     };
   });
@@ -295,15 +304,19 @@ function renderResults() {
   document.querySelectorAll('th.tv-only').forEach(function (th) {
     th.classList.toggle('hidden', !tv);
   });
-  const matchedCount = rows.filter(function (r) { return !r.error; }).length;
+  const matchedCount = rows.filter(function (r) { return !r.error && !r.needsChoice; }).length;
+  const chooseCount = rows.filter(function (r) { return r.needsChoice; }).length;
   $('resultsSummary').textContent = matchedCount + ' of ' + rows.length + ' titles matched on TMDB. ' +
-    'Check the details below (especially any row highlighted as unmatched) before saving.';
+    (chooseCount ? chooseCount + ' share a title with other films — pick the right one from the list under the title. ' : '') +
+    'Check the details below (especially highlighted rows) before saving. ' +
+    'If a match is wrong, choose another from the list under its title.';
 
   const tbody = $('resultsBody');
   tbody.innerHTML = '';
   rows.forEach(function (r, i) {
     const tr = document.createElement('tr');
     if (r.error) tr.classList.add('row-error');
+    if (r.needsChoice) tr.classList.add('row-error', 'row-choose');
     if (r.status === 'saved' || r.status === 'duplicate') tr.classList.add('row-saved');
 
     tr.appendChild(cellCheckbox(i));
@@ -350,7 +363,65 @@ function cellTitle(i) {
     note.textContent = 'You typed: "' + rows[i].queryTitle + '"';
     td.appendChild(note);
   }
+  // Films: list every TMDB match. Nothing is pre-selected when several
+  // films share the exact title (e.g. Get Carter 1971 / 2000).
+  const cands = rows[i].candidates || [];
+  if (cands.length > 1 || rows[i].needsChoice) {
+    const sel = document.createElement('select');
+    sel.className = 'match-select';
+    if (!rows[i].selectedId) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = rows[i].needsChoice
+        ? '— choose (' + cands.length + ' matches) —'
+        : '— choose a TMDB match —';
+      sel.appendChild(o);
+    }
+    cands.forEach(function (c) {
+      const o = document.createElement('option');
+      o.value = c.id;
+      o.textContent = c.title + (c.year ? ' (' + c.year + ')' : '');
+      if (String(c.id) === String(rows[i].selectedId)) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = function () { if (sel.value) chooseMatch(i, sel.value); };
+    td.appendChild(sel);
+  }
   return td;
+}
+
+// User picked a film from a row's dropdown: fetch its details and fill the row.
+async function chooseMatch(i, id) {
+  const r = rows[i];
+  r.status = 'loading';
+  renderResults();
+  try {
+    const d = await apiGet({ action: 'movieDetails', id: id, pin: pin });
+    if (d.error === 'bad_pin') {
+      alert('That PIN was rejected by the backend. Use "Change PIN" to re-enter it.');
+    } else if (!d.ok) {
+      alert('Could not fetch details for that film (' + (d.error || 'unknown error') + '). Try again.');
+    } else {
+      r.matchedTitle = d.matchedTitle || '';
+      r.title = d.matchedTitle || r.title;
+      r.director = d.director || '';
+      r.cast = d.cast || '';
+      r.genre = d.genre || '';
+      r.year = d.year || '';
+      r.studio = d.studio || '';
+      r.overview = d.overview || '';
+      r.tmdbUrl = d.tmdbUrl || '';
+      r.selectedId = id;
+      r.needsChoice = false;
+      r.error = null;
+      r.included = true;
+      r.remarks = 'Looked up via TMDB (picked from list)';
+    }
+  } catch (err) {
+    alert('Could not fetch details for that film — check your connection and try again.');
+  }
+  r.status = 'pending';
+  renderResults();
 }
 
 function cellInput(i, field, cls) {
@@ -368,7 +439,8 @@ function cellStatus(i) {
   const td = document.createElement('td');
   td.className = 'row-status';
   const labels = {
-    pending: rows[i].error ? '⚠ unmatched' : '',
+    pending: rows[i].error ? '⚠ unmatched' : (rows[i].needsChoice ? '⚠ pick a film' : ''),
+    loading: 'Fetching…',
     saving: 'Saving…',
     saved: '✓ saved',
     duplicate: '= already in sheet',
